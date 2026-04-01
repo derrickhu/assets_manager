@@ -1,0 +1,82 @@
+---
+description: 
+alwaysApply: true
+enabled: true
+updatedAt: 2026-04-01T16:15:01.314Z
+provider: 
+---
+
+# 游戏资产管理中心 (Asset Manager)
+
+## 项目概述
+游戏资产管理网站，用于分类浏览、搜索、预览和下载游戏资产（图片/音频）。
+支持局域网共享，家庭内其他设备可通过浏览器访问。
+
+## 目录结构
+
+```
+/Users/huyi/dk_proj/asset_manager/    # 项目根目录
+├── server.py          # Flask 后端服务器（核心）
+├── index.html         # 前端主页
+├── styles.css         # 前端样式
+├── app.js             # 前端交互逻辑
+├── service.sh         # 服务管理脚本（启动/停止/重启）
+├── requirements.txt   # Python 依赖
+├── .thumbs/           # 缩略图缓存目录（自动生成）
+├── .server.pid        # 运行时 PID 文件
+└── .server.log        # 运行时日志文件
+
+/Users/huyi/dk_proj/game_assets/      # 游戏资产目录（只读引用）
+├── huahua/            # 花花 🌸 - 花店经营合成游戏
+│   └── assets/        # 图片资源（1073 png）
+├── jrpg/              # JRPG ⚔️ - 日式角色扮演游戏
+│   └── assets/        # 图片资源（26 png）
+└── xiaochu/           # 消除 🧩 - 五行消除冒险游戏
+    ├── assets/images/ # 图片资源（654 png, 192 jpg）
+    └── audio/         # 音频资源（14 mp3, 1 m4a, 1 wav）
+```
+
+## 服务管理
+
+### 管理脚本 `service.sh`
+
+```bash
+./service.sh start     # 后台启动（端口 5050）
+./service.sh stop      # 停止服务
+./service.sh restart   # 重启（代码变更后用这个）
+./service.sh status    # 查看运行状态、PID、内存、地址
+./service.sh log       # 查看最近日志
+./service.sh follow    # 实时跟踪日志
+```
+
+### 服务地址
+- 本机: `http://127.0.0.1:5050`
+- 局域网: `http://<LAN_IP>:5050`（家庭共享用这个）
+
+### Debug 自动重载
+- `server.py` 默认开启 `debug=True`，修改后端 Python 代码后**自动重载**无需手动重启
+- 设置环境变量 `ASSET_DEBUG=0` 可关闭 debug 模式
+- 修改前端文件（html/css/js）不需要重启，浏览器刷新即可
+
+## 后端 API（server.py）
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/scan` | 扫描资产目录，返回完整资产列表 + 统计 |
+| `GET /api/file/<path>` | 获取原始文件（图片/音频） |
+| `GET /api/thumb/<path>` | 获取缩略图（PIL 自动生成并缓存） |
+| `GET /api/download/<path>` | 下载文件（Content-Disposition: attachment） |
+| `GET /api/info` | 服务器信息（IP、端口等） |
+
+## 技术栈
+- **后端**: Python 3 + Flask + flask-cors + Pillow
+- **前端**: 原生 HTML/CSS/JS（无框架，暗色主题）
+- **缩略图**: PIL 生成 300x300 JPEG 缩存到 `.thumbs/`
+
+## 开发约定
+
+1. **新增游戏项目**: 在 `server.py` 的 `GAME_META` 字典中添加条目即可
+2. **新增资产类型**: 修改 `IMAGE_EXTS` 或 `AUDIO_EXTS` 集合
+3. **后端代码改动**: debug 模式会自动重载；如未生效用 `./service.sh restart`
+4. **前端代码改动**: 直接刷新浏览器
+5. **安全**: API 有路径穿越保护，只允许访问 `ASSET_ROOT` 下的文件

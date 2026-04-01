@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎮 游戏资产管理中心</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <div class="app">
+        <!-- 侧边栏 -->
+        <aside class="sidebar" id="sidebar">
+            <div class="logo">
+                <span class="logo-icon">🎮</span>
+                <h1>资产管家</h1>
+            </div>
+            
+            <!-- 服务器信息 -->
+            <div class="server-info" id="server-info">
+                <span class="status-dot"></span>
+                <span id="server-url">加载中...</span>
+            </div>
+
+            <nav class="nav">
+                <div class="nav-section">
+                    <h3>资产分类</h3>
+                    <ul class="nav-list">
+                        <li class="nav-item active" data-filter="all">
+                            <span class="nav-icon">📁</span>
+                            <span>全部资产</span>
+                            <span class="badge" id="total-count">0</span>
+                        </li>
+                        <li class="nav-item" data-filter="image">
+                            <span class="nav-icon">🖼️</span>
+                            <span>图片素材</span>
+                            <span class="badge" id="image-count">0</span>
+                        </li>
+                        <li class="nav-item" data-filter="audio">
+                            <span class="nav-icon">🎵</span>
+                            <span>音频素材</span>
+                            <span class="badge" id="audio-count">0</span>
+                        </li>
+                    </ul>
+                </div>
+                <div class="nav-section">
+                    <h3>游戏项目</h3>
+                    <ul class="nav-list" id="game-nav-list">
+                        <!-- 动态生成 -->
+                    </ul>
+                </div>
+                <div class="nav-section" id="sub-nav-section" style="display:none">
+                    <h3>子分类</h3>
+                    <ul class="nav-list" id="sub-nav-list">
+                        <!-- 动态生成 -->
+                    </ul>
+                </div>
+            </nav>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="main">
+            <!-- 顶部栏 -->
+            <header class="header">
+                <button class="sidebar-toggle" onclick="toggleSidebar()">☰</button>
+                <div class="search-box">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="search-input" placeholder="搜索资产文件名..." />
+                </div>
+                <div class="header-actions">
+                    <select id="sort-select" class="sort-select">
+                        <option value="name">按名称</option>
+                        <option value="size">按大小</option>
+                        <option value="modified">按修改时间</option>
+                    </select>
+                    <button class="btn btn-secondary" onclick="refreshAssets()">🔄 刷新</button>
+                </div>
+            </header>
+
+            <!-- 面包屑 -->
+            <div class="breadcrumb" id="breadcrumb">
+                <span class="crumb active">全部资产</span>
+            </div>
+
+            <!-- 统计卡片 -->
+            <div class="stats-grid">
+                <div class="stat-card stat-card-images">
+                    <div class="stat-icon">🖼️</div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="stat-images">0</div>
+                        <div class="stat-label">图片文件</div>
+                    </div>
+                </div>
+                <div class="stat-card stat-card-audio">
+                    <div class="stat-icon">🎵</div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="stat-audio">0</div>
+                        <div class="stat-label">音频文件</div>
+                    </div>
+                </div>
+                <div class="stat-card stat-card-games">
+                    <div class="stat-icon">🎮</div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="stat-games">0</div>
+                        <div class="stat-label">游戏项目</div>
+                    </div>
+                </div>
+                <div class="stat-card stat-card-total">
+                    <div class="stat-icon">📦</div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="stat-total">0</div>
+                        <div class="stat-label">资产总数</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 资产网格 -->
+            <div class="assets-section">
+                <div class="section-header">
+                    <h2 class="section-title">
+                        <span id="section-title-text">全部资产</span>
+                        <span class="section-count" id="section-count">(0)</span>
+                    </h2>
+                    <div class="view-toggle">
+                        <button class="view-btn active" data-view="grid" onclick="setView('grid')">▦</button>
+                        <button class="view-btn" data-view="list" onclick="setView('list')">☰</button>
+                    </div>
+                </div>
+                <div class="assets-grid" id="assets-grid">
+                    <div class="loading"><div class="spinner"></div><span>扫描资产目录中...</span></div>
+                </div>
+                <!-- 分页 -->
+                <div class="pagination" id="pagination"></div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 图片预览模态框 -->
+    <div class="modal" id="image-modal">
+        <div class="modal-overlay" onclick="closeModal()"></div>
+        <div class="modal-content">
+            <button class="modal-close" onclick="closeModal()">✕</button>
+            <div class="modal-body">
+                <img id="modal-image" src="" alt="预览" />
+            </div>
+            <div class="modal-info">
+                <h3 id="modal-title"></h3>
+                <p id="modal-path"></p>
+                <p id="modal-size"></p>
+                <div class="modal-actions">
+                    <a id="modal-download" class="btn btn-primary" href="#" download>⬇ 下载原图</a>
+                    <button class="btn btn-secondary" onclick="copyLink()">🔗 复制链接</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 音频播放器（底部固定） -->
+    <div class="audio-player" id="audio-player">
+        <div class="audio-info">
+            <span class="audio-icon">🎵</span>
+            <span class="audio-name" id="audio-name">未播放</span>
+        </div>
+        <audio controls id="audio-element"></audio>
+        <a id="audio-download" class="btn-icon" href="#" download title="下载">⬇</a>
+        <button class="audio-close" onclick="closeAudioPlayer()">✕</button>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
