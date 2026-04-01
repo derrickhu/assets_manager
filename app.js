@@ -20,6 +20,9 @@ document.addEventListener('DOMContentLoaded', () => {
     initEvents();
     loadAssets();
     loadServerInfo();
+    loadGitInfo();
+    // 每 30 秒刷新 Git 状态
+    setInterval(loadGitInfo, 30000);
 });
 
 // ─── 事件绑定 ───
@@ -436,6 +439,246 @@ function closeAudioPlayer() {
     audio.pause();
     audio.src = '';
     player.classList.remove('active');
+}
+
+// ═══════════════════════════════════════
+// Git 功能
+// ═══════════════════════════════════════
+
+let gitInfo = null;
+
+async function loadGitInfo() {
+    try {
+        const resp = await fetch('/api/git/info');
+        gitInfo = await resp.json();
+        renderGitPanel();
+    } catch (err) {
+        console.error('Git info load failed:', err);
+        document.getElementById('git-panel').innerHTML = `
+            <div class="git-not-repo">
+                <div class="git-not-repo-icon">⚠️</div>
+                <div>无法获取 Git 信息</div>
+            </div>`;
+    }
+}
+
+function renderGitPanel() {
+    const panel = document.getElementById('git-panel');
+    
+    if (!gitInfo || !gitInfo.is_repo) {
+        panel.innerHTML = `
+            <div class="git-not-repo">
+                <div class="git-not-repo-icon">📁</div>
+                <div>未初始化 Git 仓库</div>
+                <button class="git-btn primary" style="margin-top:10px;width:100%" onclick="gitInit()">
+                    🔧 初始化 Git
+                </button>
+            </div>`;
+        return;
+    }
+    
+    const hasChanges = gitInfo.modified.length > 0 || gitInfo.untracked.length > 0;
+    const canPush = gitInfo.ahead > 0;
+    const canPull = gitInfo.behind > 0;
+    
+    let filesHtml = '';
+    if (gitInfo.modified.length > 0 || gitInfo.untracked.length > 0) {
+        const allFiles = [
+            ...gitInfo.modified.map(f => ({ status: f.status, path: f.path })),
+            ...gitInfo.untracked.map(f => ({ status: '??', path: f }))
+        ];
+        filesHtml = `
+            <div class="git-files">
+                ${allFiles.slice(0, 10).map(f => `
+                    <div class="git-file-item">
+                        <span class="git-file-status ${f.status.replace('?', 'Q')}">${f.status}</span>
+                        <span class="git-file-path" title="${esc(f.path)}">${esc(f.path)}</span>
+                    </div>
+                `).join('')}
+                ${allFiles.length > 10 ? `<div class="git-file-item">...还有 ${allFiles.length - 10} 个文件</div>` : ''}
+            </div>
+        `;
+    }
+    
+    panel.innerHTML = `
+        <div class="git-header">
+            <span class="git-icon">🌿</span>
+            <span class="git-branch">
+                <span class="git-branch-icon">⎇</span>
+                ${gitInfo.branch || 'unknown'}
+            </span>
+            ${gitInfo.commit ? `<span class="git-commit" title="${esc(gitInfo.commit.message)}">${gitInfo.commit.hash}</span>` : ''}
+        </div>
+        
+        <div class="git-status">
+            <div class="git-stat-row">
+                <span class="git-stat-label">修改</span>
+                <span class="git-stat-value modified">${gitInfo.modified.length}</span>
+            </div>
+            <div class="git-stat-row">
+                <span class="git-stat-label">未跟踪</span>
+                <span class="git-stat-value untracked">${gitInfo.untracked.length}</span>
+            </div>
+            <div class="git-stat-row">
+                <span class="git-stat-label">领先远程</span>
+                <span class="git-stat-value ahead">+${gitInfo.ahead}</span>
+            </div>
+            <div class="git-stat-row">
+                <span class="git-stat-label">落后远程</span>
+                <span class="git-stat-value behind">-${gitInfo.behind}</span>
+            </div>
+        </div>
+        
+        ${filesHtml}
+        
+        ${hasChanges ? `
+            <input type="text" class="git-message-input" id="git-commit-msg" 
+                   placeholder="提交信息..." value="Update assets">
+            <div class="git-actions">
+                <button class="git-btn primary" onclick="gitCommit()">💾 提交</button>
+                <button class="git-btn" onclick="gitStatus()">📋 状态</button>
+            </div>
+        ` : ''}
+        
+        <div class="git-actions">
+            <button class="git-btn ${canPull ? 'primary' : ''}" onclick="gitPull()" ${!canPull ? 'disabled' : ''}>
+                ⬇️ 拉取${gitInfo.behind > 0 ? ` (${gitInfo.behind})` : ''}
+            </button>
+            <button class="git-btn ${canPush ? 'primary' : ''}" onclick="gitPush()" ${!canPush ? 'disabled' : ''}>
+                ⬆️ 推送${gitInfo.ahead > 0 ? ` (${gitInfo.ahead})` : ''}
+            </button>
+        </div>
+        
+        <div class="git-actions">
+            <button class="git-btn" onclick="gitLog()">📜 日志</button>
+            <button class="git-btn" onclick="gitFetch()">🔄 获取</button>
+        </div>
+        
+        ${gitInfo.remote ? `
+            <div class="git-remote">
+                📡 ${esc(gitInfo.remote.name)}: ${esc(gitInfo.remote.url)}
+            </div>
+        ` : ''}
+    `;
+}
+
+// Git 操作
+async function gitCommit() {
+    const msg = document.getElementById('git-commit-msg')?.value || 'Update';
+    showGitResult('提交中...', 'pending');
+    
+    try {
+        const resp = await fetch('/api/git/commit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: msg })
+        });
+        const result = await resp.json();
+        
+        if (result.success) {
+            showGitResult('✅ 提交成功', 'success', result.stdout || result.stderr);
+            loadGitInfo();
+        } else {
+            showGitResult('❌ 提交失败', 'error', result.stderr || result.stdout);
+        }
+    } catch (err) {
+        showGitResult('❌ 网络错误', 'error', err.message);
+    }
+}
+
+async function gitPull() {
+    showGitResult('拉取中...', 'pending');
+    try {
+        const resp = await fetch('/api/git/pull', { method: 'POST' });
+        const result = await resp.json();
+        
+        if (result.success) {
+            showGitResult('✅ 拉取成功', 'success', result.stdout || 'Already up to date');
+            loadGitInfo();
+            refreshAssets(); // 资产可能有更新
+        } else {
+            showGitResult('❌ 拉取失败', 'error', result.stderr);
+        }
+    } catch (err) {
+        showGitResult('❌ 网络错误', 'error', err.message);
+    }
+}
+
+async function gitPush() {
+    showGitResult('推送中...', 'pending');
+    try {
+        const resp = await fetch('/api/git/push', { method: 'POST' });
+        const result = await resp.json();
+        
+        if (result.success) {
+            showGitResult('✅ 推送成功', 'success', result.stdout);
+            loadGitInfo();
+        } else {
+            showGitResult('❌ 推送失败', 'error', result.stderr);
+        }
+    } catch (err) {
+        showGitResult('❌ 网络错误', 'error', err.message);
+    }
+}
+
+async function gitFetch() {
+    showGitResult('获取远程信息...', 'pending');
+    try {
+        const resp = await fetch('/api/git/fetch', { method: 'POST' });
+        const result = await resp.json();
+        
+        if (result.success) {
+            showGitResult('✅ 获取成功', 'success', result.stdout || 'Done');
+            loadGitInfo();
+        } else {
+            showGitResult('❌ 获取失败', 'error', result.stderr);
+        }
+    } catch (err) {
+        showGitResult('❌ 网络错误', 'error', err.message);
+    }
+}
+
+async function gitStatus() {
+    showGitResult('查询状态...', 'pending');
+    try {
+        const resp = await fetch('/api/git/status');
+        const result = await resp.json();
+        showGitResult('📋 Git 状态', result.success ? 'success' : 'error', 
+            result.stdout || result.stderr || 'No output');
+    } catch (err) {
+        showGitResult('❌ 错误', 'error', err.message);
+    }
+}
+
+async function gitLog() {
+    showGitResult('查询日志...', 'pending');
+    try {
+        const resp = await fetch('/api/git/log');
+        const result = await resp.json();
+        showGitResult('📜 提交日志', result.success ? 'success' : 'error', 
+            result.stdout || result.stderr || 'No commits');
+    } catch (err) {
+        showGitResult('❌ 错误', 'error', err.message);
+    }
+}
+
+function showGitResult(title, type, content) {
+    // 移除旧的弹窗
+    document.querySelectorAll('.git-result-modal').forEach(el => el.remove());
+    
+    const modal = document.createElement('div');
+    modal.className = `git-result-modal ${type}`;
+    modal.innerHTML = `
+        <button class="git-result-close" onclick="this.parentElement.remove()">✕</button>
+        <div class="git-result-header">${title}</div>
+        ${content ? `<div class="git-result-content">${esc(content)}</div>` : ''}
+    `;
+    document.body.appendChild(modal);
+    
+    // 5秒后自动关闭
+    if (type !== 'pending') {
+        setTimeout(() => modal.remove(), 5000);
+    }
 }
 
 // ─── 视图切换 ───

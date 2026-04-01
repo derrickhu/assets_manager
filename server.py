@@ -32,6 +32,18 @@ THUMB_DIR = Path('/Users/huyi/dk_proj/asset_manager/.thumbs')
 THUMB_SIZE = (300, 300)
 PORT = 5050
 
+# Git 仓库路径（资产目录，而非代码目录）
+PROJECT_ROOT = ASSET_ROOT  # 管理 game_assets 的 Git
+
+# 允许执行的 Git 命令白名单
+GIT_COMMANDS = {
+    'status': ['git', 'status', '--short'],
+    'log': ['git', 'log', '--oneline', '-20'],
+    'branch': ['git', 'branch', '-v'],
+    'remote': ['git', 'remote', '-v'],
+    'diff': ['git', 'diff', '--stat'],
+}
+
 IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
 AUDIO_EXTS = {'.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac'}
 
@@ -205,6 +217,106 @@ def format_size(size_bytes):
         return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 
+# ─── Git 工具函数 ───────────────────────────────────────────────
+
+def run_git_command(cmd_list, cwd=None):
+    """安全执行 Git 命令"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            cmd_list,
+            cwd=cwd or PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        return {
+            'success': result.returncode == 0,
+            'stdout': result.stdout,
+            'stderr': result.stderr,
+            'code': result.returncode
+        }
+    except subprocess.TimeoutExpired:
+        return {'success': False, 'stdout': '', 'stderr': 'Command timeout', 'code': -1}
+    except Exception as e:
+        return {'success': False, 'stdout': '', 'stderr': str(e), 'code': -1}
+
+
+def get_git_info():
+    """获取 Git 仓库基本信息"""
+    info = {
+        'is_repo': False,
+        'branch': None,
+        'commit': None,
+        'remote': None,
+        'modified': [],
+        'untracked': [],
+        'ahead': 0,
+        'behind': 0,
+    }
+    
+    # 检查是否是 git 仓库
+    check = run_git_command(['git', 'rev-parse', '--git-dir'])
+    if not check['success']:
+        return info
+    
+    info['is_repo'] = True
+    
+    # 当前分支
+    branch_result = run_git_command(['git', 'branch', '--show-current'])
+    if branch_result['success']:
+        info['branch'] = branch_result['stdout'].strip()
+    
+    # 最新 commit
+    commit_result = run_git_command(['git', 'log', '-1', '--format=%h|%s|%an|%ar'])
+    if commit_result['success']:
+        parts = commit_result['stdout'].strip().split('|', 3)
+        if len(parts) >= 4:
+            info['commit'] = {
+                'hash': parts[0],
+                'message': parts[1],
+                'author': parts[2],
+                'time': parts[3]
+            }
+    
+    # 远程仓库
+    remote_result = run_git_command(['git', 'remote', '-v'])
+    if remote_result['success'] and remote_result['stdout']:
+        lines = remote_result['stdout'].strip().split('\n')
+        if lines:
+            parts = lines[0].split()
+            if len(parts) >= 2:
+                info['remote'] = {'name': parts[0], 'url': parts[1]}
+    
+    # 文件状态
+    status_result = run_git_command(['git', 'status', '--porcelain'])
+    if status_result['success']:
+        for line in status_result['stdout'].strip().split('\n'):
+            if not line:
+                continue
+            status = line[:2]
+            filepath = line[3:]
+            if status.startswith('??'):
+                info['untracked'].append(filepath)
+            else:
+                info['modified'].append({'status': status, 'path': filepath})
+    
+    # 与远程的差异（只在有远程仓库时检查）
+    if info['branch'] and info['remote']:
+        # 先 fetch 更新远程信息
+        run_git_command(['git', 'fetch', '--quiet'])
+        
+        # 尝试获取 ahead/behind
+        rev_result = run_git_command(['git', 'rev-list', '--left-right', '--count', f'origin/{info["branch"]}...HEAD'])
+        if rev_result['success']:
+            counts = rev_result['stdout'].strip().split()
+            if len(counts) == 2:
+                info['behind'] = int(counts[0])  # 本地落后远程
+                info['ahead'] = int(counts[1])   # 本地领先远程
+    
+    return info
+
+
 # ─── API 路由 ──────────────────────────────────────────────────
 
 @app.route('/')
@@ -318,6 +430,70 @@ def api_info():
         'url': f'http://{local_ip}:{PORT}',
         'has_pil': HAS_PIL,
     })
+
+
+# ─── Git API ───────────────────────────────────────────────────
+
+@app.route('/api/git/info')
+def api_git_info():
+    """获取 Git 仓库信息"""
+    return jsonify(get_git_info())
+
+
+@app.route('/api/git/<command>')
+def api_git_command(command):
+    """执行 Git 查询命令"""
+    if command not in GIT_COMMANDS:
+        return jsonify({'error': 'Unknown command'}), 400
+    
+    result = run_git_command(GIT_COMMANDS[command])
+    return jsonify(result)
+
+
+@app.route('/api/git/pull', methods=['POST'])
+def api_git_pull():
+    """执行 git pull"""
+    result = run_git_command(['git', 'pull'])
+    return jsonify(result)
+
+
+@app.route('/api/git/push', methods=['POST'])
+def api_git_push():
+    """执行 git push"""
+    result = run_git_command(['git', 'push'])
+    return jsonify(result)
+
+
+@app.route('/api/git/fetch', methods=['POST'])
+def api_git_fetch():
+    """执行 git fetch"""
+    result = run_git_command(['git', 'fetch'])
+    return jsonify(result)
+
+
+@app.route('/api/git/commit', methods=['POST'])
+def api_git_commit():
+    """执行 git commit -am <message>"""
+    data = request.get_json() or {}
+    message = data.get('message', 'Update from asset manager')
+    
+    # 先 add 所有修改
+    run_git_command(['git', 'add', '-A'])
+    # 再 commit
+    result = run_git_command(['git', 'commit', '-m', message])
+    return jsonify(result)
+
+
+@app.route('/api/git/checkout', methods=['POST'])
+def api_git_checkout():
+    """切换分支"""
+    data = request.get_json() or {}
+    branch = data.get('branch')
+    if not branch:
+        return jsonify({'error': 'Branch name required'}), 400
+    
+    result = run_git_command(['git', 'checkout', branch])
+    return jsonify(result)
 
 
 # ─── 启动 ──────────────────────────────────────────────────────
