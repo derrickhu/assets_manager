@@ -496,6 +496,129 @@ def api_git_checkout():
     return jsonify(result)
 
 
+# ─── 文件删除 API ───────────────────────────────────────────────
+
+@app.route('/api/delete/<path:rel_path>', methods=['DELETE'])
+def api_delete_file(rel_path):
+    """删除资产文件"""
+    fpath = ASSET_ROOT / rel_path
+    
+    # 安全检查：路径必须在 ASSET_ROOT 下
+    try:
+        resolved = fpath.resolve()
+        root_resolved = ASSET_ROOT.resolve()
+        resolved.relative_to(root_resolved)
+    except (ValueError, RuntimeError):
+        return jsonify({'success': False, 'error': 'Invalid path'}), 403
+    
+    if not fpath.exists():
+        return jsonify({'success': False, 'error': 'File not found'}), 404
+    
+    if not fpath.is_file():
+        return jsonify({'success': False, 'error': 'Not a file'}), 400
+    
+    try:
+        # 删除文件
+        fpath.unlink()
+        
+        # 同时删除对应的缩略图缓存
+        thumb_name = hashlib.md5(str(rel_path).encode()).hexdigest() + '.jpg'
+        thumb_path = THUMB_DIR / thumb_name
+        if thumb_path.exists():
+            thumb_path.unlink()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Deleted: {fpath.name}'
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+# ─── 文件上传 API ───────────────────────────────────────────────
+
+@app.route('/api/upload', methods=['POST'])
+def api_upload_file():
+    """上传资产文件"""
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'success': False, 'error': 'Empty filename'}), 400
+    
+    # 获取上传参数
+    game = request.form.get('game', 'huahua')  # 默认上传到 huahua
+    subdir = request.form.get('subdir', '')    # 子目录
+    
+    # 验证游戏目录
+    if game not in ['huahua', 'jrpg', 'xiaochu']:
+        return jsonify({'success': False, 'error': 'Invalid game directory'}), 400
+    
+    # 安全检查文件名
+    filename = secure_filename(file.filename)
+    if not filename:
+        return jsonify({'success': False, 'error': 'Invalid filename'}), 400
+    
+    # 检查文件类型
+    ext = Path(filename).suffix.lower()
+    if ext not in IMAGE_EXTS and ext not in AUDIO_EXTS:
+        return jsonify({'success': False, 'error': f'Unsupported file type: {ext}'}), 400
+    
+    # 构建目标路径
+    target_dir = ASSET_ROOT / game
+    if subdir:
+        # 清理子目录路径，防止路径穿越
+        subdir = secure_filename(subdir)
+        target_dir = target_dir / subdir
+    
+    # 确保目标目录存在
+    target_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 如果文件已存在，添加数字后缀
+    target_path = target_dir / filename
+    counter = 1
+    original_stem = Path(filename).stem
+    original_ext = Path(filename).suffix
+    while target_path.exists():
+        new_name = f"{original_stem}_{counter}{original_ext}"
+        target_path = target_dir / new_name
+        counter += 1
+    
+    try:
+        # 保存文件
+        file.save(target_path)
+        
+        # 计算相对路径
+        rel_path = target_path.relative_to(ASSET_ROOT)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Uploaded: {target_path.name}',
+            'path': str(rel_path),
+            'size': target_path.stat().st_size
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+# 安全的文件名处理
+def secure_filename(filename):
+    """清理文件名，移除危险字符"""
+    import re
+    # 移除路径分隔符和危险字符
+    filename = re.sub(r'[\\/:*?"<>|]', '', filename)
+    # 移除前导点和空格
+    filename = filename.strip('. ')
+    return filename
+
+
 # ─── 启动 ──────────────────────────────────────────────────────
 
 if __name__ == '__main__':

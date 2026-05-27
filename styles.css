@@ -228,6 +228,14 @@ body {
 .btn-secondary { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border); }
 .btn-secondary:hover { background: var(--bg-hover); }
 
+.btn-danger {
+    background: var(--danger);
+    color: white;
+}
+.btn-danger:hover {
+    background: #dc2626;
+}
+
 .btn-icon {
     background: none;
     border: none;
@@ -413,6 +421,68 @@ body {
 }
 
 .asset-card:hover .asset-download-btn { opacity: 1; }
+
+.asset-delete-btn {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    background: rgba(239, 68, 68, 0.85);
+    border: none;
+    color: white;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    opacity: 0;
+    transition: opacity 0.2s;
+    backdrop-filter: blur(4px);
+    z-index: 5;
+}
+
+.asset-card:hover .asset-delete-btn {
+    opacity: 1;
+}
+
+.asset-delete-btn:hover {
+    background: rgba(220, 38, 38, 1);
+}
+
+/* 多选复选框 */
+.asset-checkbox {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+    z-index: 10;
+    accent-color: var(--primary);
+}
+
+.asset-card.selected {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px var(--primary);
+}
+
+.asset-card.select-mode {
+    cursor: default;
+}
+
+.asset-card.select-mode .asset-preview {
+    cursor: pointer;
+}
+
+.select-mode-hint {
+    background: var(--primary);
+    color: white;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
 
 .asset-info { padding: 10px 12px; }
 
@@ -858,6 +928,166 @@ body {
     padding-top: 8px;
     border-top: 1px solid var(--border);
     word-break: break-all;
+}
+
+/* 上传模态框 */
+.upload-modal-content {
+    min-width: 500px;
+    max-width: 600px;
+}
+
+.upload-form {
+    padding: 20px 0;
+}
+
+.upload-target {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+    align-items: center;
+}
+
+.upload-target label {
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.upload-target select {
+    background: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+}
+
+.upload-target input {
+    flex: 1;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+}
+
+.upload-dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    padding: 40px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+}
+
+.upload-dropzone:hover,
+.upload-dropzone.dragover {
+    border-color: var(--primary);
+    background: rgba(99, 102, 241, 0.05);
+}
+
+.upload-dropzone input {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
+}
+
+.upload-dropzone-inner {
+    pointer-events: none;
+}
+
+.upload-icon {
+    font-size: 48px;
+    margin-bottom: 12px;
+}
+
+.upload-dropzone p {
+    color: var(--text-secondary);
+    font-size: 14px;
+    margin: 4px 0;
+}
+
+.upload-link {
+    color: var(--primary);
+    text-decoration: underline;
+}
+
+.upload-hint {
+    font-size: 12px !important;
+    color: var(--text-muted) !important;
+}
+
+.upload-file-list {
+    max-height: 200px;
+    overflow-y: auto;
+    margin: 20px 0;
+}
+
+.upload-file-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px;
+    background: var(--bg-dark);
+    border-radius: 8px;
+    margin-bottom: 8px;
+}
+
+.upload-file-icon {
+    font-size: 24px;
+}
+
+.upload-file-info {
+    flex: 1;
+}
+
+.upload-file-name {
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.upload-file-size {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.upload-file-status {
+    font-size: 12px;
+}
+
+.upload-file-status.pending { color: var(--text-muted); }
+.upload-file-status.uploading { color: var(--primary); }
+.upload-file-status.success { color: var(--success); }
+.upload-file-status.error { color: var(--danger); }
+
+.upload-file-remove {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 4px;
+}
+
+.upload-file-remove:hover {
+    color: var(--danger);
+}
+
+.upload-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
 }
 
 /* Git 操作结果弹窗 */

@@ -81,6 +81,9 @@
                         <option value="modified">按修改时间</option>
                     </select>
                     <button class="btn btn-secondary" onclick="refreshAssets()">🔄 刷新</button>
+                    <button class="btn btn-primary" onclick="showUploadModal()">⬆️ 上传</button>
+                    <button class="btn btn-secondary" id="select-mode-btn" onclick="toggleSelectMode()">☐ 多选</button>
+                    <button class="btn btn-danger" id="batch-delete-btn" onclick="batchDelete()" style="display:none">🗑 删除 (<span id="selected-count">0</span>)</button>
                 </div>
             </header>
 
@@ -128,10 +131,12 @@
                         <span id="section-title-text">全部资产</span>
                         <span class="section-count" id="section-count">(0)</span>
                     </h2>
-                    <div class="view-toggle">
-                        <button class="view-btn active" data-view="grid" onclick="setView('grid')">▦</button>
-                        <button class="view-btn" data-view="list" onclick="setView('list')">☰</button>
-                    </div>
+                <div class="view-toggle">
+                    <button class="view-btn active" data-view="grid" onclick="setView('grid')">▦</button>
+                    <button class="view-btn" data-view="list" onclick="setView('list')">☰</button>
+                </div>
+                <button class="btn btn-secondary" id="select-mode-btn" onclick="toggleSelectMode()">☐ 多选</button>
+                <button class="btn btn-danger" id="batch-delete-btn" onclick="batchDelete()" style="display:none">🗑 删除 (<span id="selected-count">0</span>)</button>
                 </div>
                 <div class="assets-grid" id="assets-grid">
                     <div class="loading"><div class="spinner"></div><span>扫描资产目录中...</span></div>
@@ -171,6 +176,43 @@
         <audio controls id="audio-element"></audio>
         <a id="audio-download" class="btn-icon" href="#" download title="下载">⬇</a>
         <button class="audio-close" onclick="closeAudioPlayer()">✕</button>
+    </div>
+
+    <!-- 上传模态框 -->
+    <div class="modal" id="upload-modal">
+        <div class="modal-overlay" onclick="closeUploadModal()"></div>
+        <div class="modal-content upload-modal-content">
+            <button class="modal-close" onclick="closeUploadModal()">✕</button>
+            <h3>⬆️ 上传素材</h3>
+            
+            <div class="upload-form">
+                <div class="upload-target">
+                    <label>目标位置：</label>
+                    <select id="upload-game">
+                        <option value="huahua">🌸 花花</option>
+                        <option value="jrpg">⚔️ JRPG</option>
+                        <option value="xiaochu">🧩 消除</option>
+                    </select>
+                    <input type="text" id="upload-subdir" placeholder="子目录（可选）" />
+                </div>
+                
+                <div class="upload-dropzone" id="upload-dropzone">
+                    <div class="upload-dropzone-inner">
+                        <div class="upload-icon">📁</div>
+                        <p>拖拽文件到此处，或 <span class="upload-link">点击选择</span></p>
+                        <p class="upload-hint">支持图片 (png, jpg, gif) 和音频 (mp3, wav)</p>
+                    </div>
+                    <input type="file" id="upload-input" multiple accept="image/*,audio/*" />
+                </div>
+                
+                <div class="upload-file-list" id="upload-file-list"></div>
+                
+                <div class="upload-actions">
+                    <button class="btn btn-secondary" onclick="closeUploadModal()">取消</button>
+                    <button class="btn btn-primary" id="upload-btn" onclick="startUpload()" disabled>开始上传</button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script src="/app.js"></script>

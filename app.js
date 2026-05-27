@@ -13,6 +13,8 @@ let searchQuery = '';
 let currentPage = 1;
 let viewMode = 'grid';
 let sortBy = 'name';
+let selectMode = false;       // 多选模式
+let selectedAssets = new Set(); // 选中的资产ID
 const PAGE_SIZE = 80;
 
 // ─── 初始化 ───
@@ -241,10 +243,26 @@ function createCard(asset) {
         return createListItem(asset, gameInfo, sizeStr);
     }
 
+    const isSelected = selectedAssets.has(asset.id);
+    const selectedClass = isSelected ? 'selected' : '';
+    const selectModeClass = selectMode ? 'select-mode' : '';
+    
+    // 多选模式显示复选框，否则显示删除按钮
+    const selectControl = selectMode 
+        ? `<input type="checkbox" class="asset-checkbox" ${isSelected ? 'checked' : ''} 
+            onclick="toggleAssetSelection('${asset.id}', event)">`
+        : `<button class="asset-delete-btn" onclick="deleteAsset(event, '${esc(asset.path)}', '${esc(asset.name)}')" title="删除">🗑</button>`;
+    
+    // 多选模式下点击卡片切换选择，非多选模式下打开预览
+    const cardClick = selectMode 
+        ? `onclick="toggleAssetSelection('${asset.id}')"`
+        : `onclick="previewImage('${esc(asset.path)}', '${esc(asset.name)}', '${sizeStr}')"`;
+    
     if (asset.type === 'image') {
         return `
-        <div class="asset-card" onclick="previewImage('${esc(asset.path)}', '${esc(asset.name)}', '${sizeStr}')">
+        <div class="asset-card ${selectedClass} ${selectModeClass}" ${cardClick}>
             <div class="asset-preview">
+                ${selectControl}
                 <img src="/api/thumb/${encPath(asset.path)}" alt="${esc(asset.name)}" loading="lazy"
                      onerror="this.parentElement.innerHTML='<div class=asset-icon>🖼️</div>'" />
                 <span class="asset-type-badge">${asset.ext}</span>
@@ -260,9 +278,13 @@ function createCard(asset) {
             </div>
         </div>`;
     } else {
+        const audioClick = selectMode 
+            ? `onclick="toggleAssetSelection('${asset.id}')"`
+            : `onclick="playAudio('${esc(asset.path)}', '${esc(asset.name)}')"`;
         return `
-        <div class="asset-card" onclick="playAudio('${esc(asset.path)}', '${esc(asset.name)}')">
+        <div class="asset-card ${selectedClass} ${selectModeClass}" ${audioClick}>
             <div class="asset-preview audio-preview">
+                ${selectControl}
                 <div class="asset-icon">🎵</div>
                 <span class="asset-type-badge">${asset.ext}</span>
                 <a class="asset-download-btn" href="/api/download/${encPath(asset.path)}" 
@@ -439,6 +461,183 @@ function closeAudioPlayer() {
     audio.pause();
     audio.src = '';
     player.classList.remove('active');
+}
+
+// ═══════════════════════════════════════
+// 上传功能
+// ═══════════════════════════════════════
+
+let uploadQueue = [];
+
+function showUploadModal() {
+    document.getElementById('upload-modal').classList.add('active');
+    uploadQueue = [];
+    renderUploadFileList();
+    setupUploadDragDrop();
+}
+
+function closeUploadModal() {
+    document.getElementById('upload-modal').classList.remove('active');
+    uploadQueue = [];
+}
+
+function setupUploadDragDrop() {
+    const dropzone = document.getElementById('upload-dropzone');
+    const input = document.getElementById('upload-input');
+    
+    // 点击选择文件
+    dropzone.addEventListener('click', () => input.click());
+    
+    // 文件选择
+    input.addEventListener('change', (e) => {
+        addFilesToQueue(e.target.files);
+        input.value = ''; // 清空，允许重复选择相同文件
+    });
+    
+    // 拖拽事件
+    dropzone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropzone.classList.add('dragover');
+    });
+    
+    dropzone.addEventListener('dragleave', () => {
+        dropzone.classList.remove('dragover');
+    });
+    
+    dropzone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('dragover');
+        addFilesToQueue(e.dataTransfer.files);
+    });
+}
+
+function addFilesToQueue(files) {
+    const allowedExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.mp3', '.wav', '.ogg', '.m4a'];
+    
+    for (const file of files) {
+        const ext = '.' + file.name.split('.').pop().toLowerCase();
+        if (!allowedExts.includes(ext)) {
+            showGitResult('❌ 不支持的文件类型', 'error', `${file.name} (${ext})`);
+            continue;
+        }
+        
+        uploadQueue.push({
+            file: file,
+            name: file.name,
+            size: formatSize(file.size),
+            status: 'pending', // pending, uploading, success, error
+            progress: 0
+        });
+    }
+    
+    renderUploadFileList();
+    updateUploadButton();
+}
+
+function renderUploadFileList() {
+    const container = document.getElementById('upload-file-list');
+    
+    if (uploadQueue.length === 0) {
+        container.innerHTML = '';
+        return;
+    }
+    
+    container.innerHTML = uploadQueue.map((item, index) => {
+        const icon = item.file.type.startsWith('image/') ? '🖼️' : '🎵';
+        const statusText = {
+            'pending': '等待中',
+            'uploading': '上传中...',
+            'success': '✓ 完成',
+            'error': '✗ 失败'
+        }[item.status];
+        
+        return `
+            <div class="upload-file-item">
+                <span class="upload-file-icon">${icon}</span>
+                <div class="upload-file-info">
+                    <div class="upload-file-name">${esc(item.name)}</div>
+                    <div class="upload-file-size">${item.size}</div>
+                </div>
+                <span class="upload-file-status ${item.status}">${statusText}</span>
+                ${item.status === 'pending' ? `
+                    <button class="upload-file-remove" onclick="removeFromQueue(${index})">✕</button>
+                ` : ''}
+            </div>
+        `;
+    }).join('');
+}
+
+function removeFromQueue(index) {
+    uploadQueue.splice(index, 1);
+    renderUploadFileList();
+    updateUploadButton();
+}
+
+function updateUploadButton() {
+    const btn = document.getElementById('upload-btn');
+    const pendingCount = uploadQueue.filter(i => i.status === 'pending').length;
+    btn.disabled = pendingCount === 0;
+    btn.textContent = pendingCount > 0 ? `开始上传 (${pendingCount})` : '开始上传';
+}
+
+async function startUpload() {
+    const game = document.getElementById('upload-game').value;
+    const subdir = document.getElementById('upload-subdir').value.trim();
+    
+    const pendingItems = uploadQueue.filter(i => i.status === 'pending');
+    if (pendingItems.length === 0) return;
+    
+    const btn = document.getElementById('upload-btn');
+    btn.disabled = true;
+    
+    let successCount = 0;
+    let failCount = 0;
+    
+    for (const item of pendingItems) {
+        item.status = 'uploading';
+        renderUploadFileList();
+        
+        const formData = new FormData();
+        formData.append('file', item.file);
+        formData.append('game', game);
+        if (subdir) formData.append('subdir', subdir);
+        
+        try {
+            const resp = await fetch('/api/upload', {
+                method: 'POST',
+                body: formData
+            });
+            const result = await resp.json();
+            
+            if (result.success) {
+                item.status = 'success';
+                successCount++;
+            } else {
+                item.status = 'error';
+                item.error = result.error;
+                failCount++;
+            }
+        } catch (err) {
+            item.status = 'error';
+            item.error = err.message;
+            failCount++;
+        }
+        
+        renderUploadFileList();
+    }
+    
+    // 显示结果
+    if (failCount === 0) {
+        showGitResult('✅ 上传完成', 'success', `成功上传 ${successCount} 个文件`);
+        setTimeout(() => {
+            closeUploadModal();
+            refreshAssets();
+            loadGitInfo();
+        }, 1500);
+    } else {
+        showGitResult(`⚠️ 上传完成 (${successCount} 成功, ${failCount} 失败)`, 'error');
+        updateUploadButton();
+    }
 }
 
 // ═══════════════════════════════════════
@@ -681,11 +880,143 @@ function showGitResult(title, type, content) {
     }
 }
 
+// ═══════════════════════════════════════
+// 删除功能
+// ═══════════════════════════════════════
+
+async function deleteAsset(event, path, name) {
+    event.stopPropagation();
+    
+    if (!confirm(`确定要删除 "${name}" 吗？\n\n此操作不可恢复！`)) {
+        return;
+    }
+    
+    showGitResult('删除中...', 'pending');
+    
+    try {
+        const resp = await fetch(`/api/delete/${encPath(path)}`, {
+            method: 'DELETE'
+        });
+        const result = await resp.json();
+        
+        if (result.success) {
+            showGitResult('✅ 删除成功', 'success', result.message);
+            // 刷新资产列表
+            refreshAssets();
+            // 同时刷新 Git 状态（文件被删了）
+            loadGitInfo();
+        } else {
+            showGitResult('❌ 删除失败', 'error', result.error);
+        }
+    } catch (err) {
+        showGitResult('❌ 网络错误', 'error', err.message);
+    }
+}
+
 // ─── 视图切换 ───
 function setView(mode) {
     viewMode = mode;
     document.querySelectorAll('.view-btn').forEach(b => b.classList.toggle('active', b.dataset.view === mode));
     render();
+}
+
+// ═══════════════════════════════════════
+// 多选模式
+// ═══════════════════════════════════════
+
+function toggleSelectMode() {
+    selectMode = !selectMode;
+    const btn = document.getElementById('select-mode-btn');
+    const deleteBtn = document.getElementById('batch-delete-btn');
+    
+    if (selectMode) {
+        btn.textContent = '☑ 退出多选';
+        btn.classList.add('active');
+        deleteBtn.style.display = 'inline-flex';
+        selectedAssets.clear();
+        updateSelectedCount();
+    } else {
+        btn.textContent = '☐ 多选';
+        btn.classList.remove('active');
+        deleteBtn.style.display = 'none';
+        selectedAssets.clear();
+    }
+    render();
+}
+
+function toggleAssetSelection(assetId, event) {
+    if (event) event.stopPropagation();
+    
+    if (selectedAssets.has(assetId)) {
+        selectedAssets.delete(assetId);
+    } else {
+        selectedAssets.add(assetId);
+    }
+    updateSelectedCount();
+    render(); // 重新渲染以更新选中状态
+}
+
+function updateSelectedCount() {
+    const count = selectedAssets.size;
+    document.getElementById('selected-count').textContent = count;
+    document.getElementById('batch-delete-btn').disabled = count === 0;
+}
+
+async function batchDelete() {
+    if (selectedAssets.size === 0) {
+        alert('请先选择要删除的文件');
+        return;
+    }
+    
+    const assetsToDelete = allAssets.filter(a => selectedAssets.has(a.id));
+    const fileNames = assetsToDelete.map(a => a.name).join('\n');
+    
+    if (!confirm(`确定要删除以下 ${selectedAssets.size} 个文件吗？\n\n${fileNames.slice(0, 500)}${fileNames.length > 500 ? '\n...' : ''}\n\n此操作不可恢复！`)) {
+        return;
+    }
+    
+    showGitResult(`正在删除 ${selectedAssets.size} 个文件...`, 'pending');
+    
+    let successCount = 0;
+    let failCount = 0;
+    const errors = [];
+    
+    for (const assetId of selectedAssets) {
+        const asset = allAssets.find(a => a.id === assetId);
+        if (!asset) continue;
+        
+        try {
+            const resp = await fetch(`/api/delete/${encPath(asset.path)}`, {
+                method: 'DELETE'
+            });
+            const result = await resp.json();
+            
+            if (result.success) {
+                successCount++;
+            } else {
+                failCount++;
+                errors.push(`${asset.name}: ${result.error}`);
+            }
+        } catch (err) {
+            failCount++;
+            errors.push(`${asset.name}: ${err.message}`);
+        }
+    }
+    
+    // 清空选择
+    selectedAssets.clear();
+    updateSelectedCount();
+    
+    // 显示结果
+    if (failCount === 0) {
+        showGitResult('✅ 批量删除成功', 'success', `成功删除 ${successCount} 个文件`);
+    } else {
+        showGitResult(`⚠️ 删除完成 (${successCount} 成功, ${failCount} 失败)`, 'error', errors.slice(0, 5).join('\n'));
+    }
+    
+    // 刷新
+    refreshAssets();
+    loadGitInfo();
 }
 
 // ─── 刷新 ───
