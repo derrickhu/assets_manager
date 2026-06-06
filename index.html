@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>🎮 游戏资产管理中心</title>
     <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/video_tool.css">
 </head>
 <body>
     <div class="app">
@@ -15,10 +16,13 @@
                 <h1>资产管家</h1>
             </div>
             
-            <!-- 服务器信息 -->
-            <div class="server-info" id="server-info">
-                <span class="status-dot"></span>
-                <span id="server-url">加载中...</span>
+            <!-- 服务器信息（点击打开局域网地址） -->
+            <div class="server-info-wrap">
+                <a class="server-info" id="server-info" href="#" target="_blank" rel="noopener">
+                    <span class="status-dot"></span>
+                    <span class="server-info-text" id="server-url">加载中...</span>
+                </a>
+                <button type="button" class="server-copy-btn" id="server-copy-btn" onclick="copyServerUrl(event)" title="复制局域网地址">📋</button>
             </div>
 
             <nav class="nav">
@@ -54,6 +58,15 @@
                         <!-- 动态生成 -->
                     </ul>
                 </div>
+                <div class="nav-section">
+                    <h3>工具</h3>
+                    <ul class="nav-list">
+                        <li class="nav-item" data-view="video-tool" id="nav-video-tool">
+                            <span class="nav-icon">🎬</span>
+                            <span>视频截帧</span>
+                        </li>
+                    </ul>
+                </div>
                 
                 <!-- Git 面板 -->
                 <div class="nav-section git-section">
@@ -65,8 +78,8 @@
             </nav>
         </aside>
 
-        <!-- 主内容区 -->
-        <main class="main">
+        <!-- 主内容区：资产浏览 -->
+        <main class="main" id="assets-view">
             <!-- 顶部栏 -->
             <header class="header">
                 <button class="sidebar-toggle" onclick="toggleSidebar()">☰</button>
@@ -145,6 +158,146 @@
                 <div class="pagination" id="pagination"></div>
             </div>
         </main>
+
+        <!-- 视频截帧工具视图 -->
+        <main class="main view-hidden" id="video-tool-view">
+            <header class="header">
+                <button class="sidebar-toggle" onclick="toggleSidebar()">☰</button>
+                <h2 style="font-size:18px;font-weight:600;">🎬 视频截帧</h2>
+                <div class="header-actions">
+                    <button class="btn btn-secondary" onclick="switchToAssetsView()">← 返回资产库</button>
+                </div>
+            </header>
+
+            <div id="vt-ffmpeg-banner" class="vt-banner" style="display:none;">
+                ffmpeg 未就绪。若已安装请在本机执行 <code>cd asset_manager && ./service.sh install</code> 重启服务后硬刷新页面。
+            </div>
+
+            <div class="vt-top-row">
+                <div class="vt-panel">
+                    <h3>上传视频</h3>
+                    <div class="vt-dropzone" id="vt-dropzone">
+                        <div>拖拽或点击选择视频</div>
+                        <div class="upload-hint" style="margin-top:8px;font-size:12px;color:var(--text-muted);">mp4 / mov / webm / mkv</div>
+                        <input type="file" id="vt-file-input" accept="video/mp4,video/quicktime,video/webm,video/x-matroska,.mp4,.mov,.webm,.mkv" />
+                    </div>
+                    <div class="vt-upload-status" id="vt-upload-status"></div>
+                    <h3 style="margin-top:16px;">最近任务</h3>
+                    <div class="vt-video-list" id="vt-video-list"></div>
+                </div>
+                <div class="vt-panel vt-player-wrap">
+                    <h3>预览</h3>
+                    <video id="vt-player" controls playsinline></video>
+                    <div class="vt-time-row">
+                        <input type="range" id="vt-slider" min="0" max="0" value="0" step="1" />
+                    </div>
+                    <div class="vt-time-row">
+                        <span class="vt-time-display" id="vt-time-display">0 / 0</span>
+                        <input type="text" class="vt-time-input" id="vt-time-input" placeholder="秒" title="秒数或 mm:ss" />
+                        <button class="btn btn-secondary btn-sm" onclick="vtSeekToInput()">跳转</button>
+                        <button class="btn btn-primary btn-sm" onclick="vtCaptureCurrentFrame()">截取当前帧</button>
+                    </div>
+                    <div class="vt-meta-line" id="vt-video-meta"></div>
+                    <div class="vt-btn-row">
+                        <button class="btn btn-danger btn-sm" onclick="vtDeleteCurrentVideo()" id="vt-delete-video-btn">删除任务</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="vt-player-row">
+                <div class="vt-panel vt-controls">
+                    <h3>截帧设置</h3>
+                    <label>模式</label>
+                    <select id="vt-mode">
+                        <option value="single">单帧（当前时间）</option>
+                        <option value="interval">固定间隔</option>
+                        <option value="count">均匀 N 帧</option>
+                        <option value="timestamps">指定时间点</option>
+                    </select>
+                    <label>输出格式</label>
+                    <select id="vt-format">
+                        <option value="png">PNG</option>
+                        <option value="jpg">JPG</option>
+                    </select>
+                    <label>文件名前缀（可选）</label>
+                    <input type="text" id="vt-prefix" placeholder="留空则用视频名" />
+                    <div data-vt-mode="interval">
+                        <label>间隔（秒）</label>
+                        <input type="number" id="vt-interval" value="1" min="0.1" step="0.1" />
+                        <label>起始时间（秒或 mm:ss）</label>
+                        <input type="text" id="vt-start" value="0" />
+                        <label>结束时间（可选）</label>
+                        <input type="text" id="vt-end" placeholder="留空到结尾" />
+                    </div>
+                    <div data-vt-mode="count" style="display:none">
+                        <label>帧数</label>
+                        <input type="number" id="vt-count" value="10" min="1" max="200" />
+                        <label>起始时间</label>
+                        <input type="text" id="vt-start-count" value="0" />
+                    </div>
+                    <div data-vt-mode="timestamps" style="display:none">
+                        <label>时间点列表（秒或 mm:ss，逗号/空格分隔）</label>
+                        <input type="text" id="vt-timestamps" placeholder="0, 1.5, 3, 10" />
+                    </div>
+                    <div class="vt-btn-row">
+                        <button class="btn btn-primary" id="vt-extract-btn" onclick="vtExtractFrames()">生成帧</button>
+                    </div>
+                </div>
+                <div class="vt-panel">
+                    <h3>说明</h3>
+                    <p style="font-size:13px;color:var(--text-secondary);line-height:1.7;">
+                        常用流程：选视频 → 上方「快捷全片截帧」设间隔一键生成 → 下方结果区挑选下载或删除。左侧「截帧设置」支持单帧、自定义区间等高级模式。
+                    </p>
+                </div>
+            </div>
+
+            <div class="vt-panel vt-quick-extract" id="vt-quick-extract">
+                <div class="vt-quick-head">
+                    <div>
+                        <h3>⚡ 快捷全片截帧</h3>
+                        <p class="vt-quick-desc">从视频开头到结尾，按固定间隔自动截完，结果在下方挑选下载</p>
+                    </div>
+                    <div class="vt-quick-estimate" id="vt-quick-estimate">请先选择或上传视频</div>
+                </div>
+                <div class="vt-quick-body">
+                    <div class="vt-quick-field">
+                        <label for="vt-quick-interval">截帧间隔</label>
+                        <div class="vt-quick-interval-row">
+                            <input type="number" id="vt-quick-interval" value="1" min="0.1" step="0.1" />
+                            <span class="vt-quick-unit">秒</span>
+                            <div class="vt-quick-presets">
+                                <button type="button" class="vt-preset-btn" data-sec="0.5">0.5s</button>
+                                <button type="button" class="vt-preset-btn" data-sec="1">1s</button>
+                                <button type="button" class="vt-preset-btn" data-sec="2">2s</button>
+                                <button type="button" class="vt-preset-btn" data-sec="5">5s</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="vt-quick-field">
+                        <label for="vt-quick-format">输出格式</label>
+                        <select id="vt-quick-format">
+                            <option value="png">PNG</option>
+                            <option value="jpg">JPG</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary vt-quick-btn" id="vt-quick-extract-btn" disabled onclick="vtQuickExtractAll()">一键全片截帧</button>
+                </div>
+            </div>
+
+            <div class="vt-panel vt-frames-section">
+                <h3>截帧结果 (<span id="vt-frame-count">0</span>)</h3>
+                <div class="vt-frames-toolbar">
+                    <label><input type="checkbox" onchange="vtSelectAllFrames(this.checked)" /> 全选</label>
+                    <span style="font-size:12px;color:var(--text-muted);">已选 <span id="vt-selected-count">0</span></span>
+                    <button class="btn btn-primary btn-sm" id="vt-download-btn" disabled onclick="vtDownloadToLocal()">下载到本地</button>
+                    <button class="btn btn-danger btn-sm" id="vt-delete-frames-btn" disabled onclick="vtDeleteSelectedFrames()">删除</button>
+                    <button class="btn btn-secondary btn-sm" onclick="vtRefreshFrames()">刷新</button>
+                </div>
+                <div class="vt-frame-grid" id="vt-frame-grid">
+                    <div class="vt-empty-hint">暂无截帧</div>
+                </div>
+            </div>
+        </main>
     </div>
 
     <!-- 图片预览模态框 -->
@@ -188,11 +341,7 @@
             <div class="upload-form">
                 <div class="upload-target">
                     <label>目标位置：</label>
-                    <select id="upload-game">
-                        <option value="huahua">🌸 花花</option>
-                        <option value="jrpg">⚔️ JRPG</option>
-                        <option value="xiaochu">🧩 消除</option>
-                    </select>
+                    <select id="upload-game"></select>
                     <input type="text" id="upload-subdir" placeholder="子目录（可选）" />
                 </div>
                 
@@ -216,5 +365,6 @@
     </div>
 
     <script src="/app.js"></script>
+    <script src="/video_tool.js"></script>
 </body>
 </html>

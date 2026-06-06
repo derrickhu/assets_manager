@@ -17,8 +17,10 @@ from pathlib import Path
 from io import BytesIO
 from functools import lru_cache
 
-from flask import Flask, jsonify, send_file, request, abort, render_template
+from flask import Flask, jsonify, send_file, request, abort, render_template, Response
 from flask_cors import CORS
+
+import video_tools as vt
 
 try:
     from PIL import Image
@@ -30,7 +32,8 @@ except ImportError:
 ASSET_ROOT = Path('/Users/huyi/dk_proj/game_assets')
 THUMB_DIR = Path('/Users/huyi/dk_proj/asset_manager/.thumbs')
 THUMB_SIZE = (300, 300)
-PORT = 5050
+PORT = int(os.environ.get('PORT', '5050'))
+HOST = os.environ.get('HOST', '0.0.0.0')
 
 # Git 仓库路径（资产目录，而非代码目录）
 PROJECT_ROOT = ASSET_ROOT  # 管理 game_assets 的 Git
@@ -51,7 +54,9 @@ GAME_META = {
     'huahua': {'name': '花花', 'icon': '🌸', 'desc': '花店经营合成游戏'},
     'jrpg':   {'name': 'JRPG', 'icon': '⚔️', 'desc': '日式角色扮演游戏'},
     'xiaochu': {'name': '消除', 'icon': '🧩', 'desc': '五行消除冒险游戏'},
+    'wujin_wenzhang': {'name': '无尽纹章', 'icon': '🛡️', 'desc': '无尽纹章游戏'},
 }
+VALID_GAME_IDS = frozenset(GAME_META.keys())
 
 # ─── Flask App ──────────────────────────────────────────────────
 app = Flask(__name__, static_folder='static', template_folder='.')
@@ -73,13 +78,11 @@ def get_local_ip():
         if ip.startswith('127.') or ip.startswith('169.254.'):
             raise ValueError("Got loopback or link-local")
         
-        # 优先选择 192.168.x.x 或 10.x.x.x（真实局域网）
-        if ip.startswith('192.168.') or ip.startswith('10.'):
-            return ip
-            
-        # 如果是其他地址（如 VPN 的 192.168.255.x），尝试方法2找更好的
+        # 优先选择真实局域网（排除 VPN 192.168.255.x）
         if ip.startswith('192.168.255.'):
             raise ValueError("Got VPN address")
+        if ip.startswith('192.168.') or ip.startswith('10.'):
+            return ip
             
         return ip
     except Exception:
@@ -104,11 +107,14 @@ def get_local_ip():
         if matches:
             return matches[0]
             
-        # 最后找任何非回环、非链路本地
+        # 最后找任何非回环、非链路本地、非 VPN 段
         matches = re.findall(r'inet (\d+\.\d+\.\d+\.\d+)', output)
         for m in matches:
-            if not m.startswith('127.') and not m.startswith('169.254.'):
-                return m
+            if m.startswith('127.') or m.startswith('169.254.'):
+                continue
+            if m.startswith('192.168.255.'):
+                continue
+            return m
     except Exception:
         pass
     
@@ -334,6 +340,16 @@ def serve_js():
     return send_file('app.js', mimetype='application/javascript')
 
 
+@app.route('/video_tool.js')
+def serve_video_tool_js():
+    return send_file('video_tool.js', mimetype='application/javascript')
+
+
+@app.route('/video_tool.css')
+def serve_video_tool_css():
+    return send_file('video_tool.css', mimetype='text/css')
+
+
 @app.route('/api/scan')
 def api_scan():
     """扫描资产目录，返回完整资产列表"""
@@ -360,19 +376,39 @@ def api_scan():
         if a['subcategory']:
             games[g]['subcategories'].add(a['subcategory'])
     
-    # set 不能 JSON 序列化
-    for g in games.values():
-        g['subcategories'] = sorted(g['subcategories'])
+    # 补全 GAME_META 中尚无资产文件的游戏（空目录也显示在侧栏）
+    for game_id, meta in GAME_META.items():
+        if game_id not in games:
+            games[game_id] = {
+                'id': game_id,
+                'name': meta['name'],
+                'icon': meta['icon'],
+                'desc': meta['desc'],
+                'image_count': 0,
+                'audio_count': 0,
+                'total_size': 0,
+                'subcategories': [],
+            }
+
+    meta_order = list(GAME_META.keys())
+    game_list = sorted(
+        games.values(),
+        key=lambda g: meta_order.index(g['id']) if g['id'] in meta_order else len(meta_order),
+    )
+
+    for g in game_list:
+        if isinstance(g.get('subcategories'), set):
+            g['subcategories'] = sorted(g['subcategories'])
         g['total_size_str'] = format_size(g['total_size'])
-    
+
     return jsonify({
         'assets': assets,
-        'games': list(games.values()),
+        'games': game_list,
         'stats': {
             'total': len(assets),
             'images': sum(1 for a in assets if a['type'] == 'image'),
             'audio': sum(1 for a in assets if a['type'] == 'audio'),
-            'games': len(games),
+            'games': len(game_list),
         }
     })
 
@@ -423,13 +459,191 @@ def api_download(rel_path):
 def api_info():
     """服务器信息"""
     local_ip = get_local_ip()
+    ffmpeg = vt.check_ffmpeg()
     return jsonify({
         'asset_root': str(ASSET_ROOT),
         'local_ip': local_ip,
         'port': PORT,
-        'url': f'http://{local_ip}:{PORT}',
+        # 浏览器请用 localhost；0.0.0.0 仅作服务绑定，不能作为访问地址
+        'url': f'http://localhost:{PORT}',
+        'lan_url': f'http://{local_ip}:{PORT}',
         'has_pil': HAS_PIL,
+        'ffmpeg': ffmpeg,
+        'video_max_mb': vt.VIDEO_MAX_MB,
     })
+
+
+@app.route('/api/games')
+def api_games():
+    """游戏列表（供视频截帧导出等工具使用）"""
+    return jsonify({
+        'games': [
+            {'id': gid, **meta}
+            for gid, meta in GAME_META.items()
+        ],
+    })
+
+
+# ─── 视频截帧工具 API ───────────────────────────────────────────
+
+@app.route('/api/video/status')
+def api_video_status():
+    return jsonify({
+        'ffmpeg': vt.check_ffmpeg(),
+        'video_max_mb': vt.VIDEO_MAX_MB,
+        'max_extract_frames': vt.MAX_EXTRACT_FRAMES,
+        'supported_exts': sorted(vt.VIDEO_EXTS),
+    })
+
+
+@app.route('/api/video/list')
+def api_video_list():
+    return jsonify({'videos': vt.list_videos()})
+
+
+@app.route('/api/video/upload', methods=['POST'])
+def api_video_upload():
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': 'No file provided'}), 400
+    file = request.files['file']
+    if not file.filename:
+        return jsonify({'success': False, 'error': 'Empty filename'}), 400
+    try:
+        meta = vt.save_upload(file, file.filename)
+        return jsonify({'success': True, 'video': meta})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+
+@app.route('/api/video/<video_id>/stream')
+def api_video_stream(video_id):
+    try:
+        path = vt.get_video_path(video_id)
+    except FileNotFoundError:
+        abort(404)
+    mime = mimetypes.guess_type(path.name)[0] or 'video/mp4'
+    return send_file(path, mimetype=mime, conditional=True)
+
+
+@app.route('/api/video/<video_id>/meta')
+def api_video_meta(video_id):
+    try:
+        return jsonify(vt.get_meta(video_id))
+    except FileNotFoundError:
+        return jsonify({'error': 'Video not found'}), 404
+
+
+@app.route('/api/video/<video_id>/extract', methods=['POST'])
+def api_video_extract(video_id):
+    data = request.get_json() or {}
+    try:
+        result = vt.extract_frames(
+            video_id,
+            mode=data.get('mode', 'single'),
+            fmt=data.get('format', 'png'),
+            quality=int(data.get('quality', 85)),
+            prefix=data.get('prefix', ''),
+            timestamp_ms=data.get('timestamp_ms'),
+            interval_sec=data.get('interval_sec'),
+            start_ms=int(data.get('start_ms', 0)),
+            end_ms=data.get('end_ms'),
+            count=data.get('count'),
+            timestamps_ms=data.get('timestamps_ms'),
+        )
+        return jsonify({'success': True, **result})
+    except FileNotFoundError:
+        return jsonify({'success': False, 'error': 'Video not found'}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+
+@app.route('/api/video/<video_id>/frames')
+def api_video_frames(video_id):
+    batch_id = request.args.get('batch_id')
+    return jsonify({'frames': vt.list_frames(video_id, batch_id)})
+
+
+@app.route('/api/video/frame/<path:rel_path>')
+def api_video_frame(rel_path):
+    thumb = request.args.get('thumb') == '1'
+    try:
+        path = vt.resolve_workspace_path(rel_path)
+    except ValueError:
+        abort(403)
+    if not path.exists() or not path.is_file():
+        abort(404)
+    if thumb:
+        t = vt.make_frame_thumbnail(rel_path)
+        if t and t.exists():
+            return send_file(t, mimetype='image/jpeg')
+    mime = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
+    if request.args.get('download') == '1':
+        return send_file(path, mimetype=mime, as_attachment=True, download_name=path.name)
+    return send_file(path, mimetype=mime)
+
+
+@app.route('/api/video/<video_id>/export', methods=['POST'])
+def api_video_export(video_id):
+    data = request.get_json() or {}
+    frame_paths = data.get('frame_paths') or []
+    game = data.get('game', '')
+    subdir = data.get('subdir', '')
+    rename_prefix = data.get('rename', '')
+    if not frame_paths:
+        return jsonify({'success': False, 'error': 'No frames selected'}), 400
+    try:
+        vt.get_meta(video_id)
+        exported = vt.export_frames_to_game_assets(
+            frame_paths, ASSET_ROOT, game, set(VALID_GAME_IDS), subdir, rename_prefix,
+        )
+        return jsonify({'success': True, 'exported': exported, 'game': game})
+    except FileNotFoundError as e:
+        return jsonify({'success': False, 'error': str(e)}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+
+@app.route('/api/video/<video_id>/download-batch', methods=['POST'])
+def api_video_download_batch(video_id):
+    data = request.get_json() or {}
+    frame_paths = data.get('frame_paths') or []
+    if not frame_paths:
+        return jsonify({'success': False, 'error': 'No frames selected'}), 400
+    try:
+        buf = vt.create_frames_zip(frame_paths)
+        return send_file(
+            buf,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=f'{video_id}_frames.zip',
+        )
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+
+@app.route('/api/video/<video_id>/delete-frames', methods=['POST'])
+def api_video_delete_frames(video_id):
+    data = request.get_json() or {}
+    frame_paths = data.get('frame_paths') or []
+    if not frame_paths:
+        return jsonify({'success': False, 'error': 'No frames selected'}), 400
+    try:
+        vt.get_meta(video_id)
+        deleted = vt.delete_frames(video_id, frame_paths)
+        return jsonify({'success': True, 'deleted': deleted})
+    except FileNotFoundError as e:
+        return jsonify({'success': False, 'error': str(e)}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+
+@app.route('/api/video/<video_id>', methods=['DELETE'])
+def api_video_delete(video_id):
+    try:
+        vt.delete_video(video_id)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # ─── Git API ───────────────────────────────────────────────────
@@ -555,7 +769,7 @@ def api_upload_file():
     subdir = request.form.get('subdir', '')    # 子目录
     
     # 验证游戏目录
-    if game not in ['huahua', 'jrpg', 'xiaochu']:
+    if game not in VALID_GAME_IDS:
         return jsonify({'success': False, 'error': 'Invalid game directory'}), 400
     
     # 安全检查文件名
@@ -622,14 +836,22 @@ def secure_filename(filename):
 # ─── 启动 ──────────────────────────────────────────────────────
 
 if __name__ == '__main__':
+    vt.ensure_workspace()
+    removed = vt.cleanup_stale_workspace()
+    if removed:
+        print(f'  🧹 视频工作区清理: 删除 {removed} 个过期任务')
+
     local_ip = get_local_ip()
+    ffmpeg = vt.check_ffmpeg()
     print("=" * 60)
     print("  🎮  游戏资产管理服务器")
     print("=" * 60)
     print(f"  📁 资产目录: {ASSET_ROOT}")
-    print(f"  🌐 访问地址: http://{local_ip}:{PORT}")
+    print(f"  🔌 监听地址: {HOST}:{PORT}")
+    print(f"  🌐 局域网访问: http://{local_ip}:{PORT}")
     print(f"  🖼️ 缩略图缓存: {THUMB_DIR}")
     print(f"  📷 PIL 支持: {'✅' if HAS_PIL else '❌ pip install Pillow'}")
+    print(f"  🎬 ffmpeg: {'✅' if ffmpeg['available'] else '❌ brew install ffmpeg'}")
     
     # debug=True 开启后端代码变更自动重载
     # 生产环境下设 ASSET_DEBUG=0 关闭
@@ -640,4 +862,4 @@ if __name__ == '__main__':
         print("  🔒 Debug 模式: 已关闭")
     print("=" * 60)
     
-    app.run(host='0.0.0.0', port=PORT, debug=use_debug, use_reloader=use_debug)
+    app.run(host=HOST, port=PORT, debug=use_debug, use_reloader=use_debug)

@@ -13,6 +13,8 @@ SERVER_SCRIPT="$APP_DIR/server.py"
 PID_FILE="$APP_DIR/.server.pid"
 LOG_FILE="$APP_DIR/.server.log"
 PORT=5050
+LAUNCHD_LABEL="com.dk.asset-manager"
+LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
 
 # ─── 颜色 ───
 RED='\033[0;31m'
@@ -78,13 +80,15 @@ is_running() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
+        if kill -0 "$pid" 2>/dev/null && lsof -ti:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
             return 0
         else
-            # PID 文件过期，清理
             rm -f "$PID_FILE"
-            return 1
         fi
+    fi
+    # launchd 保活时不写 PID 文件，改查端口
+    if lsof -ti:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+        return 0
     fi
     return 1
 }
@@ -92,7 +96,9 @@ is_running() {
 get_pid() {
     if [ -f "$PID_FILE" ]; then
         cat "$PID_FILE"
+        return
     fi
+    lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1
 }
 
 # ─── 启动 ───
@@ -116,22 +122,36 @@ do_start() {
         sleep 1
     fi
 
-    # 后台启动，日志输出到文件
+    # 后台启动（nohup），日志输出到文件；关闭 debug/reloader 避免双进程与 PID 漂移
     cd "$APP_DIR"
+    export HOST=0.0.0.0
+    export PORT=$PORT
+    export ASSET_DEBUG=0
     nohup python3 "$SERVER_SCRIPT" >> "$LOG_FILE" 2>&1 &
     local new_pid=$!
     echo "$new_pid" > "$PID_FILE"
 
-    # 等待启动确认
-    sleep 1.5
-    if is_running; then
+    # 等待启动确认（Flask 绑定 0.0.0.0 需要稍等）
+    sleep 2.5
+    local listen_ok=0
+    for _ in 1 2 3 4 5; do
+        if lsof -ti:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+            listen_ok=1
+            break
+        fi
+        sleep 0.5
+    done
+
+    if is_running && [ "$listen_ok" -eq 1 ]; then
         local lan_ip
         lan_ip=$(get_lan_ip)
         echo ""
         echo -e "${GREEN}${BOLD}  ✅ 服务启动成功！${NC}"
         echo -e "  ─────────────────────────────────────"
         echo -e "  ${BOLD}PID:${NC}        $new_pid"
-        echo -e "  ${BOLD}访问地址:${NC}   ${CYAN}http://${lan_ip}:${PORT}${NC}"
+        echo -e "  ${BOLD}绑定:${NC}        0.0.0.0:${PORT}（局域网可访问）"
+        echo -e "  ${BOLD}浏览器打开:${NC}  ${CYAN}http://localhost:${PORT}${NC}"
+        echo -e "  ${BOLD}局域网:${NC}      ${CYAN}http://${lan_ip}:${PORT}${NC}"
         echo -e "  ${BOLD}日志文件:${NC}   $LOG_FILE"
         echo -e "  ─────────────────────────────────────"
         echo ""
@@ -204,8 +224,9 @@ do_status() {
         lan_ip=$(get_lan_ip)
         echo -e "  状态:     ${GREEN}${BOLD}● 运行中${NC}"
         echo -e "  PID:      $pid"
-        echo -e "  端口:     $PORT"
-        echo -e "  访问地址: ${CYAN}http://${lan_ip}:${PORT}${NC}"
+        echo -e "  绑定:     ${CYAN}0.0.0.0:${PORT}${NC}"
+        echo -e "  浏览器打开: ${CYAN}http://localhost:${PORT}${NC}"
+        echo -e "  局域网:     ${CYAN}http://${lan_ip}:${PORT}${NC}"
         echo -e "  日志:     $LOG_FILE"
         
         # 显示进程信息
@@ -244,6 +265,70 @@ do_follow() {
     tail -f "$LOG_FILE" 2>/dev/null
 }
 
+# ─── 安装 launchd 保活（登录自启 + 崩溃重启）───
+do_install() {
+    local python_bin
+    python_bin=$(command -v python3)
+    if [ -z "$python_bin" ]; then
+        echo -e "${RED}❌ 未找到 python3${NC}"
+        return 1
+    fi
+    mkdir -p "$HOME/Library/LaunchAgents"
+    cat > "$LAUNCHD_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${python_bin}</string>
+        <string>${SERVER_SCRIPT}</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${APP_DIR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOST</key>
+        <string>0.0.0.0</string>
+        <key>PORT</key>
+        <string>${PORT}</string>
+        <key>ASSET_DEBUG</key>
+        <string>0</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>FFMPEG_PATH</key>
+        <string>/opt/homebrew/bin/ffmpeg</string>
+        <key>FFPROBE_PATH</key>
+        <string>/opt/homebrew/bin/ffprobe</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${LOG_FILE}</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_FILE}</string>
+</dict>
+</plist>
+EOF
+    launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST"
+    sleep 2
+    echo -e "${GREEN}✅ 已安装开机自启 + 保活${NC}"
+    echo -e "   浏览器打开: ${CYAN}http://localhost:${PORT}${NC}"
+    do_status
+}
+
+do_uninstall() {
+    launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null || true
+    rm -f "$LAUNCHD_PLIST"
+    do_stop
+    echo -e "${GREEN}✅ 已卸载 launchd 服务${NC}"
+}
+
 # ─── 主入口 ───
 case "${1:-}" in
     start)
@@ -264,6 +349,12 @@ case "${1:-}" in
     follow|tail)
         do_follow
         ;;
+    install)
+        do_install
+        ;;
+    uninstall)
+        do_uninstall
+        ;;
     *)
         echo ""
         echo -e "  ${BOLD}🎮 游戏资产管理服务器${NC}"
@@ -271,12 +362,14 @@ case "${1:-}" in
         echo -e "  用法: ${CYAN}$0 <command>${NC}"
         echo ""
         echo -e "  ${BOLD}命令:${NC}"
-        echo -e "    ${GREEN}start${NC}     启动服务（后台运行）"
-        echo -e "    ${RED}stop${NC}      停止服务"
-        echo -e "    ${YELLOW}restart${NC}   重启服务"
-        echo -e "    ${CYAN}status${NC}    查看服务状态"
-        echo -e "    ${CYAN}log${NC} [n]   查看最近 n 行日志（默认 50）"
-        echo -e "    ${CYAN}follow${NC}    实时跟踪日志"
+        echo -e "    ${GREEN}start${NC}       启动服务（后台运行）"
+        echo -e "    ${RED}stop${NC}        停止服务"
+        echo -e "    ${YELLOW}restart${NC}     重启服务"
+        echo -e "    ${GREEN}install${NC}     安装 launchd 保活（推荐，登录自启）"
+        echo -e "    ${RED}uninstall${NC}   卸载 launchd 保活"
+        echo -e "    ${CYAN}status${NC}      查看服务状态"
+        echo -e "    ${CYAN}log${NC} [n]     查看最近 n 行日志（默认 50）"
+        echo -e "    ${CYAN}follow${NC}      实时跟踪日志"
         echo ""
         exit 1
         ;;

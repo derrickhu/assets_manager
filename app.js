@@ -15,6 +15,10 @@ let viewMode = 'grid';
 let sortBy = 'name';
 let selectMode = false;       // 多选模式
 let selectedAssets = new Set(); // 选中的资产ID
+let currentAppView = 'assets';  // assets | video-tool
+let pendingAssetsGameId = null;
+let currentServerUrl = '';
+let currentServerLanUrl = '';
 const PAGE_SIZE = 80;
 
 // ─── 初始化 ───
@@ -32,6 +36,7 @@ function initEvents() {
     // 资产分类导航
     document.querySelectorAll('.nav-item[data-filter]').forEach(item => {
         item.addEventListener('click', () => {
+            switchToAssetsView();
             setActiveNav(item, 'filter');
             currentFilter = item.dataset.filter;
             currentGame = null;
@@ -39,6 +44,15 @@ function initEvents() {
             currentPage = 1;
             hideSubNav();
             render();
+        });
+    });
+
+    // 工具视图导航
+    document.querySelectorAll('.nav-item[data-view]').forEach(item => {
+        item.addEventListener('click', () => {
+            if (item.dataset.view === 'video-tool') {
+                switchToVideoToolView();
+            }
         });
     });
 
@@ -74,6 +88,18 @@ async function loadAssets() {
         games = data.games;
         updateStats(data.stats);
         buildGameNav();
+        buildUploadGameSelect();
+        if (pendingAssetsGameId) {
+            const gid = pendingAssetsGameId;
+            pendingAssetsGameId = null;
+            currentGame = gid;
+            currentFilter = 'all';
+            currentSubcat = null;
+            currentPage = 1;
+            buildSubNav(gid);
+            const gameItem = document.querySelector(`.nav-item[data-game="${gid}"]`);
+            if (gameItem) setActiveNav(gameItem, 'game');
+        }
         render();
     } catch (err) {
         console.error('加载失败:', err);
@@ -86,13 +112,67 @@ async function loadAssets() {
 }
 
 async function loadServerInfo() {
+    const link = document.getElementById('server-info');
+    const label = document.getElementById('server-url');
     try {
         const resp = await fetch('/api/info');
         const info = await resp.json();
-        document.getElementById('server-url').textContent = info.url;
+        const localUrl = info.url || `http://localhost:${info.port || 5050}`;
+        const lanUrl = info.lan_url || localUrl;
+        currentServerUrl = localUrl;
+        currentServerLanUrl = lanUrl;
+        if (label) {
+            label.innerHTML =
+                `<span class="server-lan-line">${esc(lanUrl)}</span>` +
+                `<span class="server-local-line">本机 ${esc(localUrl.replace(/^https?:\/\//, ''))}</span>`;
+        }
+        if (link) link.href = localUrl;
     } catch (e) {
-        document.getElementById('server-url').textContent = window.location.origin;
+        const url = window.location.origin;
+        currentServerUrl = url;
+        currentServerLanUrl = url;
+        if (label) label.textContent = url;
+        if (link) link.href = url;
     }
+}
+
+function copyServerUrl(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const url = currentServerLanUrl || currentServerUrl || '';
+    if (!url || url === '加载中...') return;
+
+    const done = () => {
+        const btn = document.getElementById('server-copy-btn');
+        if (!btn) return;
+        btn.classList.add('copied');
+        btn.textContent = '✓';
+        setTimeout(() => {
+            btn.classList.remove('copied');
+            btn.textContent = '📋';
+        }, 1500);
+    };
+
+    if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(url).then(done).catch(() => {
+            fallbackCopy(url);
+            done();
+        });
+    } else {
+        fallbackCopy(url);
+        done();
+    }
+}
+
+function fallbackCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
 }
 
 // ─── 构建游戏导航 ───
@@ -108,6 +188,7 @@ function buildGameNav() {
 
     list.querySelectorAll('.nav-item[data-game]').forEach(item => {
         item.addEventListener('click', () => {
+            switchToAssetsView(item.dataset.game);
             setActiveNav(item, 'game');
             currentGame = item.dataset.game;
             currentFilter = 'all';
@@ -117,6 +198,41 @@ function buildGameNav() {
             render();
         });
     });
+}
+
+function switchToVideoToolView() {
+    currentAppView = 'video-tool';
+    document.getElementById('assets-view')?.classList.add('view-hidden');
+    document.getElementById('video-tool-view')?.classList.remove('view-hidden');
+    document.querySelectorAll('.nav-item[data-filter]').forEach((el) => el.classList.remove('active'));
+    document.querySelectorAll('.nav-item[data-game]').forEach((el) => el.classList.remove('active'));
+    document.getElementById('nav-video-tool')?.classList.add('active');
+    if (typeof initVideoTool === 'function') initVideoTool();
+}
+
+function switchToAssetsView(gameId) {
+    currentAppView = 'assets';
+    document.getElementById('video-tool-view')?.classList.add('view-hidden');
+    document.getElementById('assets-view')?.classList.remove('view-hidden');
+    document.getElementById('nav-video-tool')?.classList.remove('active');
+    if (gameId) {
+        pendingAssetsGameId = gameId;
+        currentGame = gameId;
+        currentFilter = 'all';
+        currentSubcat = null;
+        currentPage = 1;
+    } else if (!document.querySelector('.nav-item[data-filter].active') && !document.querySelector('.nav-item[data-game].active')) {
+        document.querySelector('.nav-item[data-filter="all"]')?.classList.add('active');
+    }
+    refreshAssets();
+}
+
+function buildUploadGameSelect() {
+    const sel = document.getElementById('upload-game');
+    if (!sel || games.length === 0) return;
+    sel.innerHTML = games.map(g =>
+        `<option value="${g.id}">${g.icon} ${g.name}</option>`
+    ).join('');
 }
 
 // ─── 构建子分类导航 ───

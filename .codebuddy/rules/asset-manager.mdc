@@ -20,9 +20,13 @@ provider:
 ├── index.html         # 前端主页
 ├── styles.css         # 前端样式
 ├── app.js             # 前端交互逻辑
+├── video_tool.js      # 视频截帧工具前端
+├── video_tool.css     # 视频截帧工具样式
+├── video_tools.py     # 视频截帧后端（ffmpeg）
 ├── service.sh         # 服务管理脚本（启动/停止/重启）
 ├── requirements.txt   # Python 依赖
 ├── .thumbs/           # 缩略图缓存目录（自动生成）
+├── .video_workspace/  # 视频截帧工作区（自动生成，不进 git）
 ├── .server.pid        # 运行时 PID 文件
 └── .server.log        # 运行时日志文件
 
@@ -66,10 +70,30 @@ provider:
 | `GET /api/file/<path>` | 获取原始文件（图片/音频） |
 | `GET /api/thumb/<path>` | 获取缩略图（PIL 自动生成并缓存） |
 | `GET /api/download/<path>` | 下载文件（Content-Disposition: attachment） |
-| `GET /api/info` | 服务器信息（IP、端口等） |
+| `GET /api/info` | 服务器信息（IP、端口、ffmpeg 状态等） |
+| `GET /api/games` | 游戏列表（资产库侧边栏） |
+
+### 视频截帧工具 API（`/api/video/*`）
+
+与游戏资产库隔离，工作区在 `.video_workspace/`。需安装 **ffmpeg**：`brew install ffmpeg`
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/video/status` | ffmpeg 可用性 |
+| `POST /api/video/upload` | 上传视频 |
+| `GET /api/video/list` | 工作区任务列表 |
+| `GET /api/video/<id>/stream` | 视频播放 |
+| `POST /api/video/<id>/extract` | 截帧（single/interval/count/timestamps）；interval 从 start 到结尾可一键全片 |
+| `GET /api/video/<id>/frames` | 列出截帧 |
+| `GET /api/video/frame/<path>?download=1` | 单帧下载（Content-Disposition） |
+| `POST /api/video/<id>/download-batch` | 打包 ZIP 下载到浏览器本机 |
+| `POST /api/video/<id>/delete-frames` | 删除选中截帧（工作区内） |
+| `DELETE /api/video/<id>` | 删除任务 |
+
+环境变量：`VIDEO_MAX_MB`（默认 500）、`VIDEO_MAX_FRAMES`（默认 500，全片截帧上限）、`VIDEO_WORKSPACE_TTL_DAYS`（默认 7，启动时清理过期任务）
 
 ## 技术栈
-- **后端**: Python 3 + Flask + flask-cors + Pillow
+- **后端**: Python 3 + Flask + flask-cors + Pillow + ffmpeg/ffprobe
 - **前端**: 原生 HTML/CSS/JS（无框架，暗色主题）
 - **缩略图**: PIL 生成 300x300 JPEG 缩存到 `.thumbs/`
 
