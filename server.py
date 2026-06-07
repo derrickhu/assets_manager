@@ -21,6 +21,9 @@ from flask import Flask, jsonify, send_file, request, abort, render_template, Re
 from flask_cors import CORS
 
 import video_tools as vt
+import video_matte as vm
+import video_align as va
+import video_jobs as vj
 
 try:
     from PIL import Image
@@ -64,6 +67,34 @@ CORS(app)
 
 # ─── 工具函数 ──────────────────────────────────────────────────
 
+def _is_usable_lan_ip(ip):
+    if not ip:
+        return False
+    if ip.startswith('127.') or ip.startswith('169.254.'):
+        return False
+    if ip.startswith('192.168.255.'):  # 常见 VPN 段
+        return False
+    return True
+
+
+def _pick_ip_from_ifconfig(output):
+    """从 ifconfig 输出中按优先级挑选局域网 IP"""
+    import re
+
+    matches = re.findall(r'inet (192\.168\.(?!255)\d+\.\d+)', output)
+    if matches:
+        return matches[0]
+
+    matches = re.findall(r'inet (10\.\d+\.\d+\.\d+)', output)
+    if matches:
+        return matches[0]
+
+    for m in re.findall(r'inet (\d+\.\d+\.\d+\.\d+)', output):
+        if _is_usable_lan_ip(m):
+            return m
+    return None
+
+
 def get_local_ip():
     """获取局域网 IP（优先 192.168.x.x 或 10.x.x.x 真实网卡）"""
     try:
@@ -73,51 +104,40 @@ def get_local_ip():
         s.connect(('8.8.8.8', 80))
         ip = s.getsockname()[0]
         s.close()
-        
-        # 如果获取到的是 127.x 或 169.254.x，尝试方法2
-        if ip.startswith('127.') or ip.startswith('169.254.'):
-            raise ValueError("Got loopback or link-local")
-        
-        # 优先选择真实局域网（排除 VPN 192.168.255.x）
-        if ip.startswith('192.168.255.'):
-            raise ValueError("Got VPN address")
-        if ip.startswith('192.168.') or ip.startswith('10.'):
+
+        if _is_usable_lan_ip(ip) and (ip.startswith('192.168.') or ip.startswith('10.')):
             return ip
-            
-        return ip
     except Exception:
         pass
-    
-    # 方法2: 遍历所有网卡找最佳局域网 IP
-    try:
-        import subprocess
-        result = subprocess.run(['ifconfig'], capture_output=True, text=True)
-        output = result.stdout
-        
-        # 按优先级匹配：192.168.x.x > 10.x.x.x > 其他
-        import re
-        
-        # 先找 192.168.x.x（排除 192.168.255.x VPN）
-        matches = re.findall(r'inet (192\.168\.(?!255)\d+\.\d+)', output)
-        if matches:
-            return matches[0]
-        
-        # 再找 10.x.x.x
-        matches = re.findall(r'inet (10\.\d+\.\d+\.\d+)', output)
-        if matches:
-            return matches[0]
-            
-        # 最后找任何非回环、非链路本地、非 VPN 段
-        matches = re.findall(r'inet (\d+\.\d+\.\d+\.\d+)', output)
-        for m in matches:
-            if m.startswith('127.') or m.startswith('169.254.'):
-                continue
-            if m.startswith('192.168.255.'):
-                continue
-            return m
-    except Exception:
-        pass
-    
+
+    # 方法2: ifconfig（launchd 的 PATH 常不含 /sbin，需用绝对路径）
+    import subprocess
+
+    for ifconfig_bin in ('/sbin/ifconfig', '/usr/sbin/ifconfig', 'ifconfig'):
+        try:
+            result = subprocess.run(
+                [ifconfig_bin], capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0 and result.stdout:
+                ip = _pick_ip_from_ifconfig(result.stdout)
+                if ip:
+                    return ip
+        except Exception:
+            pass
+
+    # 方法3: macOS ipconfig getifaddr（不依赖 PATH）
+    for iface in ('en0', 'en1', 'en2', 'en3'):
+        try:
+            result = subprocess.run(
+                ['/usr/sbin/ipconfig', 'getifaddr', iface],
+                capture_output=True, text=True, timeout=2,
+            )
+            ip = result.stdout.strip()
+            if _is_usable_lan_ip(ip) and (ip.startswith('192.168.') or ip.startswith('10.')):
+                return ip
+        except Exception:
+            pass
+
     return '127.0.0.1'
 
 
@@ -490,6 +510,7 @@ def api_games():
 def api_video_status():
     return jsonify({
         'ffmpeg': vt.check_ffmpeg(),
+        'rembg': vm.check_rembg(),
         'video_max_mb': vt.VIDEO_MAX_MB,
         'max_extract_frames': vt.MAX_EXTRACT_FRAMES,
         'supported_exts': sorted(vt.VIDEO_EXTS),
@@ -560,7 +581,24 @@ def api_video_extract(video_id):
 @app.route('/api/video/<video_id>/frames')
 def api_video_frames(video_id):
     batch_id = request.args.get('batch_id')
-    return jsonify({'frames': vt.list_frames(video_id, batch_id)})
+    stage = request.args.get('stage')
+    frames = vt.list_frames(video_id, batch_id, stage)
+    latest = {
+        'raw': vt.latest_batch_id(video_id, 'raw'),
+        'matte': vt.latest_batch_id(video_id, 'matte'),
+        'align': vt.latest_batch_id(video_id, 'align'),
+    }
+    batch_meta = None
+    if batch_id:
+        meta_path = vt.FRAMES_DIR / video_id / batch_id / vt.BATCH_META_FILE
+        if meta_path.exists():
+            with meta_path.open('r', encoding='utf-8') as f:
+                batch_meta = json.load(f)
+    return jsonify({
+        'frames': frames,
+        'latest_batches': latest,
+        'batch_meta': batch_meta,
+    })
 
 
 @app.route('/api/video/frame/<path:rel_path>')
@@ -631,6 +669,119 @@ def api_video_delete_frames(video_id):
         vt.get_meta(video_id)
         deleted = vt.delete_frames(video_id, frame_paths)
         return jsonify({'success': True, 'deleted': deleted})
+    except FileNotFoundError as e:
+        return jsonify({'success': False, 'error': str(e)}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+
+@app.route('/api/video/jobs/<job_id>')
+def api_video_job(job_id):
+    job = vj.get_job(job_id)
+    if not job:
+        return jsonify({'success': False, 'error': 'Job not found'}), 404
+    return jsonify({'success': True, **job})
+
+
+@app.route('/api/video/<video_id>/matte', methods=['POST'])
+def api_video_matte(video_id):
+    data = request.get_json() or {}
+    frame_paths = data.get('frame_paths') or []
+    model = data.get('model') or vm.DEFAULT_MODEL
+    if not frame_paths:
+        return jsonify({'success': False, 'error': 'No frames selected'}), 400
+    try:
+        vt.get_meta(video_id)
+        rembg_status = vm.check_rembg()
+        if not rembg_status['available']:
+            return jsonify({'success': False, 'error': rembg_status.get('error')}), 400
+        job_id = vj.create_job(video_id, 'matte', len(frame_paths))
+
+        def run(job_id: str) -> None:
+            def on_progress(done: int, total: int) -> None:
+                vj.update_job(job_id, progress=done, total=total)
+
+            result = vm.batch_matte_frames(video_id, frame_paths, model, on_progress)
+            vj.update_job(job_id, batch_id=result['batch_id'], progress=result['count'])
+
+        vj.run_job_async(job_id, run)
+        return jsonify({'success': True, 'job_id': job_id, 'total': len(frame_paths)})
+    except FileNotFoundError as e:
+        return jsonify({'success': False, 'error': str(e)}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+
+@app.route('/api/video/<video_id>/align', methods=['POST'])
+def api_video_align(video_id):
+    data = request.get_json() or {}
+    frame_paths = data.get('frame_paths') or []
+    if not frame_paths:
+        return jsonify({'success': False, 'error': 'No frames selected'}), 400
+    try:
+        vt.get_meta(video_id)
+        job_id = vj.create_job(video_id, 'align', len(frame_paths))
+        canvas_w = int(data.get('canvas_w') or va.DEFAULT_CANVAS)
+        canvas_h = int(data.get('canvas_h') or va.DEFAULT_CANVAS)
+        bottom_pad = int(data.get('bottom_pad') or va.DEFAULT_BOTTOM_PAD)
+        target_height = data.get('target_height')
+        target_height = int(target_height) if target_height else None
+
+        def run(job_id: str) -> None:
+            def on_progress(done: int, total: int) -> None:
+                vj.update_job(job_id, progress=done, total=total)
+
+            result = va.batch_align_frames(
+                video_id, frame_paths,
+                canvas_w=canvas_w, canvas_h=canvas_h,
+                bottom_pad=bottom_pad, target_height=target_height,
+                on_progress=on_progress,
+            )
+            vj.update_job(job_id, batch_id=result['batch_id'], progress=result['count'])
+
+        vj.run_job_async(job_id, run)
+        return jsonify({'success': True, 'job_id': job_id, 'total': len(frame_paths)})
+    except FileNotFoundError as e:
+        return jsonify({'success': False, 'error': str(e)}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+
+@app.route('/api/video/<video_id>/align-adjust', methods=['POST'])
+def api_video_align_adjust(video_id):
+    data = request.get_json() or {}
+    batch_id = data.get('batch_id') or ''
+    adjustments = data.get('adjustments') or {}
+    if not batch_id or not adjustments:
+        return jsonify({'success': False, 'error': 'batch_id and adjustments required'}), 400
+    try:
+        vt.get_meta(video_id)
+        result = va.apply_align_adjustments(video_id, batch_id, adjustments)
+        return jsonify({'success': True, **result})
+    except FileNotFoundError as e:
+        return jsonify({'success': False, 'error': str(e)}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+
+@app.route('/api/video/<video_id>/align-preview', methods=['POST'])
+def api_video_align_preview(video_id):
+    data = request.get_json() or {}
+    batch_id = data.get('batch_id') or ''
+    source_path = data.get('source_path') or ''
+    if not batch_id or not source_path:
+        return jsonify({'success': False, 'error': 'batch_id and source_path required'}), 400
+    try:
+        vt.get_meta(video_id)
+        buf = va.preview_align_frame(
+            video_id,
+            batch_id,
+            source_path,
+            scale_mul=float(data.get('scale_mul', 1)),
+            offset_x=int(data.get('offset_x', 0)),
+            offset_y=int(data.get('offset_y', 0)),
+        )
+        return send_file(buf, mimetype='image/png')
     except FileNotFoundError as e:
         return jsonify({'success': False, 'error': str(e)}), 404
     except Exception as e:

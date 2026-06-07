@@ -75,25 +75,31 @@ provider:
 
 ### 视频截帧工具 API（`/api/video/*`）
 
-与游戏资产库隔离，工作区在 `.video_workspace/`。需安装 **ffmpeg**：`brew install ffmpeg`
+与游戏资产库隔离，工作区在 `.video_workspace/`。需安装 **ffmpeg**：`brew install ffmpeg`；抠图需 **rembg**：`pip3 install rembg onnxruntime`
 
 | 端点 | 说明 |
 |------|------|
-| `GET /api/video/status` | ffmpeg 可用性 |
+| `GET /api/video/status` | ffmpeg / rembg 可用性 |
 | `POST /api/video/upload` | 上传视频 |
 | `GET /api/video/list` | 工作区任务列表 |
 | `GET /api/video/<id>/stream` | 视频播放 |
 | `POST /api/video/<id>/extract` | 截帧（single/interval/count/timestamps）；interval 从 start 到结尾可一键全片 |
-| `GET /api/video/<id>/frames` | 列出截帧 |
+| `GET /api/video/<id>/frames?batch_id=&stage=` | 列出截帧（stage: raw/matte/align） |
 | `GET /api/video/frame/<path>?download=1` | 单帧下载（Content-Disposition） |
+| `POST /api/video/<id>/matte` | 异步批量抠图 `{ frame_paths, model }` → `{ job_id }` |
+| `POST /api/video/<id>/align` | 异步脚底对齐 `{ frame_paths, canvas_w, canvas_h, bottom_pad }` |
+| `POST /api/video/<id>/align-adjust` | 对齐编辑器保存微调 `{ batch_id, adjustments }` |
+| `GET /api/video/jobs/<job_id>` | 查询异步任务进度 |
 | `POST /api/video/<id>/download-batch` | 打包 ZIP 下载到浏览器本机 |
 | `POST /api/video/<id>/delete-frames` | 删除选中截帧（工作区内） |
 | `DELETE /api/video/<id>` | 删除任务 |
 
+工作区 batch 命名：`batch_*`（原始）、`matte_*`（抠图）、`align_*`（对齐）；元数据见各 batch 下 `_batch_meta.json`
+
 环境变量：`VIDEO_MAX_MB`（默认 500）、`VIDEO_MAX_FRAMES`（默认 500，全片截帧上限）、`VIDEO_WORKSPACE_TTL_DAYS`（默认 7，启动时清理过期任务）
 
 ## 技术栈
-- **后端**: Python 3 + Flask + flask-cors + Pillow + ffmpeg/ffprobe
+- **后端**: Python 3 + Flask + flask-cors + Pillow + ffmpeg/ffprobe + rembg/onnxruntime（抠图）
 - **前端**: 原生 HTML/CSS/JS（无框架，暗色主题）
 - **缩略图**: PIL 生成 300x300 JPEG 缩存到 `.thumbs/`
 

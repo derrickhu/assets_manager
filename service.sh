@@ -297,7 +297,7 @@ do_install() {
         <key>ASSET_DEBUG</key>
         <string>0</string>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>FFMPEG_PATH</key>
         <string>/opt/homebrew/bin/ffmpeg</string>
         <key>FFPROBE_PATH</key>

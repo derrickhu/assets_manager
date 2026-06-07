@@ -6,7 +6,17 @@ let vtMaxExtractFrames = 500;
 let vtFrames = [];
 let vtSelectedPaths = new Set();
 let vtFfmpegOk = true;
+let vtRembgOk = false;
 let vtLastBatchId = null;
+let vtStage = 'raw';
+let vtLatestBatches = { raw: null, matte: null, align: null };
+let vtBatchMeta = null;
+let vtAlignEditorIdx = 0;
+let vtAlignAdjustments = {};
+let vtAlignPlayTimer = null;
+let vtAlignPreviewTimer = null;
+let vtAlignPreviewSeq = 0;
+let vtActiveJobPoll = null;
 
 function vtEsc(s) {
     const d = document.createElement('div');
@@ -38,25 +48,34 @@ function vtParseTimeInput(str) {
 
 async function initVideoTool() {
     setupVideoToolEvents();
+    const savedModel = localStorage.getItem('vt-matte-model');
+    if (savedModel) {
+        const sel = document.getElementById('vt-matte-model');
+        if (sel) sel.value = savedModel;
+    }
     await vtLoadStatus();
     vtUpdateQuickExtractEstimate();
     await vtLoadVideoList();
 }
 
 async function vtLoadStatus() {
-    const banner = document.getElementById('vt-ffmpeg-banner');
+    const ffmpegBanner = document.getElementById('vt-ffmpeg-banner');
+    const rembgBanner = document.getElementById('vt-rembg-banner');
     try {
         const resp = await fetch('/api/video/status', { cache: 'no-store' });
         const data = await resp.json();
         vtFfmpegOk = !!data.ffmpeg?.available;
+        vtRembgOk = !!data.rembg?.available;
         if (data.max_extract_frames) vtMaxExtractFrames = data.max_extract_frames;
-        if (banner) {
-            banner.style.display = vtFfmpegOk ? 'none' : 'block';
-        }
+        if (ffmpegBanner) ffmpegBanner.style.display = vtFfmpegOk ? 'none' : 'block';
+        if (rembgBanner) rembgBanner.style.display = vtRembgOk ? 'none' : 'block';
+        vtUpdatePostProcessActions();
         return vtFfmpegOk;
     } catch (_) {
         vtFfmpegOk = false;
-        if (banner) banner.style.display = 'block';
+        vtRembgOk = false;
+        if (ffmpegBanner) ffmpegBanner.style.display = 'block';
+        if (rembgBanner) rembgBanner.style.display = 'block';
         return false;
     }
 }
@@ -88,6 +107,11 @@ async function vtSelectVideo(videoId) {
     vtCurrentVideoId = videoId;
     vtSelectedPaths.clear();
     vtLastBatchId = null;
+    vtStage = 'raw';
+    vtLatestBatches = { raw: null, matte: null, align: null };
+    vtBatchMeta = null;
+    vtUpdateStageTabs();
+
     await vtLoadVideoList();
 
     const player = document.getElementById('vt-player');
@@ -167,6 +191,20 @@ function setupVideoToolEvents() {
             vtUpdateQuickExtractEstimate();
         });
     });
+
+    document.getElementById('vt-align-onion')?.addEventListener('change', () => {
+        if (document.getElementById('vt-align-editor')?.classList.contains('active')) {
+            vtRenderAlignEditor();
+        }
+    });
+
+    ['vt-align-scale', 'vt-align-offset-x', 'vt-align-offset-y'].forEach((id) => {
+        document.getElementById(id)?.addEventListener('input', vtOnAlignSliderInput);
+    });
+}
+
+function vtOnAlignSliderInput() {
+    vtApplyAlignEditorSlidersToCurrent();
 }
 
 function vtUpdateModeFields() {
@@ -291,6 +329,8 @@ async function vtExtractFrames() {
         const data = await resp.json();
         if (!data.success) throw new Error(data.error || '截帧失败');
         vtLastBatchId = data.batch_id;
+        vtStage = 'raw';
+        vtUpdateStageTabs();
         showGitResult('✅ 截帧完成', 'success', `生成 ${data.count} 帧`);
         await vtRefreshFrames();
     } catch (err) {
@@ -342,6 +382,8 @@ async function vtQuickExtractAll() {
         const data = await resp.json();
         if (!data.success) throw new Error(data.error || '截帧失败');
         vtLastBatchId = data.batch_id;
+        vtStage = 'raw';
+        vtUpdateStageTabs();
         vtSelectedPaths.clear();
         showGitResult('✅ 全片截帧完成', 'success', `共 ${data.count} 帧，请在下方挑选`);
         await vtRefreshFrames();
@@ -359,20 +401,367 @@ async function vtQuickExtractAll() {
 async function vtRefreshFrames() {
     if (!vtCurrentVideoId) {
         vtFrames = [];
+        vtBatchMeta = null;
         vtRenderFrameGrid();
         return;
     }
-    const url = vtLastBatchId
-        ? `/api/video/${vtCurrentVideoId}/frames?batch_id=${encodeURIComponent(vtLastBatchId)}`
-        : `/api/video/${vtCurrentVideoId}/frames`;
+    const prefix = { raw: 'batch_', matte: 'matte_', align: 'align_' }[vtStage] || 'batch_';
+    let batchId = vtLastBatchId;
+    if (!batchId || !batchId.startsWith(prefix)) {
+        batchId = vtLatestBatches[vtStage] || null;
+        vtLastBatchId = batchId;
+    }
+    const params = new URLSearchParams();
+    if (batchId) params.set('batch_id', batchId);
+    else params.set('stage', vtStage);
+    const url = `/api/video/${vtCurrentVideoId}/frames?${params.toString()}`;
     try {
         const resp = await fetch(url);
         const data = await resp.json();
         vtFrames = data.frames || [];
+        vtLatestBatches = { ...vtLatestBatches, ...(data.latest_batches || {}) };
+        vtBatchMeta = data.batch_meta || null;
+        if (!vtLastBatchId && vtLatestBatches[vtStage]) {
+            vtLastBatchId = vtLatestBatches[vtStage];
+        }
+        vtUpdatePostProcessActions();
         vtRenderFrameGrid();
     } catch (_) {
         vtFrames = [];
         vtRenderFrameGrid();
+    }
+}
+
+function vtStagePrefix(stage) {
+    return { raw: 'batch_', matte: 'matte_', align: 'align_' }[stage] || 'batch_';
+}
+
+function vtUpdateStageTabs() {
+    document.querySelectorAll('.vt-stage-tab').forEach((tab) => {
+        tab.classList.toggle('active', tab.dataset.stage === vtStage);
+    });
+}
+
+function vtSwitchStage(stage) {
+    if (vtStage === stage) return;
+    vtStage = stage;
+    vtSelectedPaths.clear();
+    const prefix = vtStagePrefix(stage);
+    if (vtLastBatchId && !vtLastBatchId.startsWith(prefix)) {
+        vtLastBatchId = vtLatestBatches[stage] || null;
+    }
+    vtUpdateStageTabs();
+    vtRefreshFrames();
+}
+
+function vtUpdatePostProcessActions() {
+    const n = vtSelectedPaths.size;
+    const matteBtn = document.getElementById('vt-matte-btn');
+    const alignBtn = document.getElementById('vt-align-btn');
+    const editorBtn = document.getElementById('vt-align-editor-btn');
+    if (matteBtn) matteBtn.disabled = n === 0 || !vtRembgOk || !vtCurrentVideoId;
+    if (alignBtn) alignBtn.disabled = n === 0 || !vtCurrentVideoId;
+    const canEdit = vtStage === 'align' && vtLastBatchId && vtFrames.length > 0;
+    if (editorBtn) editorBtn.disabled = !canEdit;
+}
+
+function vtSetJobProgress(kind, done, total) {
+    const wrap = document.getElementById(`${kind}-progress`);
+    const fill = document.getElementById(`${kind}-fill`);
+    const text = document.getElementById(`${kind}-progress-text`);
+    if (!wrap) return;
+    if (total <= 0) {
+        wrap.style.display = 'none';
+        return;
+    }
+    wrap.style.display = 'flex';
+    const pct = Math.round((done / total) * 100);
+    if (fill) fill.style.width = `${pct}%`;
+    if (text) text.textContent = `${done} / ${total}`;
+}
+
+function vtSleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function vtPollJob(jobId, kind) {
+    while (true) {
+        const resp = await fetch(`/api/video/jobs/${jobId}`);
+        const data = await resp.json();
+        if (!data.success) throw new Error(data.error || 'Job 查询失败');
+        vtSetJobProgress(kind, data.progress || 0, data.total || 0);
+        if (data.status === 'done') return data;
+        if (data.status === 'error') throw new Error(data.error || '任务失败');
+        await vtSleep(1000);
+    }
+}
+
+async function vtMatteSelected() {
+    const paths = Array.from(vtSelectedPaths);
+    if (!paths.length || !vtCurrentVideoId) return;
+    await vtLoadStatus();
+    if (!vtRembgOk) {
+        showGitResult('rembg 未就绪', 'error', 'pip3 install rembg onnxruntime');
+        return;
+    }
+    const model = document.getElementById('vt-matte-model')?.value || 'birefnet-general';
+    localStorage.setItem('vt-matte-model', model);
+    const btn = document.getElementById('vt-matte-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '抠图中...'; }
+    vtSetJobProgress('vt-matte', 0, paths.length);
+    try {
+        const resp = await fetch(`/api/video/${vtCurrentVideoId}/matte`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ frame_paths: paths, model }),
+        });
+        const data = await resp.json();
+        if (!data.success) throw new Error(data.error || '抠图失败');
+        const result = await vtPollJob(data.job_id, 'vt-matte');
+        vtStage = 'matte';
+        vtLastBatchId = result.batch_id;
+        vtSelectedPaths.clear();
+        vtUpdateStageTabs();
+        showGitResult('✅ 抠图完成', 'success', `共 ${result.progress} 张`);
+        await vtRefreshFrames();
+        document.querySelector('.vt-frames-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (err) {
+        showGitResult('❌ 抠图失败', 'error', err.message);
+    } finally {
+        vtSetJobProgress('vt-matte', 0, 0);
+        if (btn) { btn.textContent = '批量抠图选中'; vtUpdatePostProcessActions(); }
+    }
+}
+
+async function vtAlignSelected() {
+    const paths = Array.from(vtSelectedPaths);
+    if (!paths.length || !vtCurrentVideoId) return;
+    const canvasW = parseInt(document.getElementById('vt-align-canvas-w')?.value || '512', 10);
+    const canvasH = parseInt(document.getElementById('vt-align-canvas-h')?.value || '512', 10);
+    const bottomPad = parseInt(document.getElementById('vt-align-bottom-pad')?.value || '8', 10);
+    const btn = document.getElementById('vt-align-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '对齐中...'; }
+    vtSetJobProgress('vt-align', 0, paths.length);
+    try {
+        const resp = await fetch(`/api/video/${vtCurrentVideoId}/align`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                frame_paths: paths,
+                canvas_w: canvasW,
+                canvas_h: canvasH,
+                bottom_pad: bottomPad,
+            }),
+        });
+        const data = await resp.json();
+        if (!data.success) throw new Error(data.error || '对齐失败');
+        const result = await vtPollJob(data.job_id, 'vt-align');
+        vtStage = 'align';
+        vtLastBatchId = result.batch_id;
+        vtSelectedPaths.clear();
+        vtUpdateStageTabs();
+        showGitResult('✅ 对齐完成', 'success', `共 ${result.progress} 张`);
+        await vtRefreshFrames();
+        document.querySelector('.vt-frames-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (err) {
+        showGitResult('❌ 对齐失败', 'error', err.message);
+    } finally {
+        vtSetJobProgress('vt-align', 0, 0);
+        if (btn) { btn.textContent = '自动对齐选中'; vtUpdatePostProcessActions(); }
+    }
+}
+
+function vtOpenAlignEditor() {
+    if (vtStage !== 'align' || !vtLastBatchId || !vtFrames.length) {
+        showGitResult('请先完成自动对齐', 'error');
+        return;
+    }
+    vtAlignAdjustments = {};
+    vtFrames.forEach((f) => {
+        const m = f.align_meta || {};
+        vtAlignAdjustments[f.filename] = {
+            scale_mul: m.scale_mul ?? 1,
+            offset_x: m.offset_x ?? 0,
+            offset_y: m.offset_y ?? 0,
+        };
+    });
+    vtAlignEditorIdx = 0;
+    document.getElementById('vt-align-editor')?.classList.add('active');
+    vtRenderAlignEditor();
+}
+
+function vtCloseAlignEditor() {
+    vtAlignEditorStopPlay();
+    vtRevokeAlignPreviewUrl();
+    if (vtAlignPreviewTimer) {
+        clearTimeout(vtAlignPreviewTimer);
+        vtAlignPreviewTimer = null;
+    }
+    document.getElementById('vt-align-editor')?.classList.remove('active');
+}
+
+function vtRevokeAlignPreviewUrl() {
+    const preview = document.getElementById('vt-align-preview');
+    if (preview?._previewUrl) {
+        URL.revokeObjectURL(preview._previewUrl);
+        preview._previewUrl = null;
+    }
+}
+
+function vtGetAlignSourcePath(frame) {
+    return frame?.source_path || frame?.path;
+}
+
+function vtScheduleAlignPreview() {
+    if (vtAlignPreviewTimer) clearTimeout(vtAlignPreviewTimer);
+    vtAlignPreviewTimer = setTimeout(() => vtUpdateAlignPreviewImage(), 60);
+}
+
+async function vtUpdateAlignPreviewImage() {
+    const f = vtFrames[vtAlignEditorIdx];
+    const preview = document.getElementById('vt-align-preview');
+    if (!f || !preview || !vtCurrentVideoId || !vtLastBatchId) return;
+
+    const adj = vtAlignAdjustments[f.filename] || { scale_mul: 1, offset_x: 0, offset_y: 0 };
+    const sourcePath = vtGetAlignSourcePath(f);
+    const seq = ++vtAlignPreviewSeq;
+    preview.classList.add('vt-preview-loading');
+
+    try {
+        const resp = await fetch(`/api/video/${vtCurrentVideoId}/align-preview`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                batch_id: vtLastBatchId,
+                source_path: sourcePath,
+                scale_mul: adj.scale_mul,
+                offset_x: adj.offset_x,
+                offset_y: adj.offset_y,
+            }),
+        });
+        if (!resp.ok || seq !== vtAlignPreviewSeq) return;
+        const blob = await resp.blob();
+        if (seq !== vtAlignPreviewSeq) return;
+        vtRevokeAlignPreviewUrl();
+        preview._previewUrl = URL.createObjectURL(blob);
+        preview.src = preview._previewUrl;
+    } catch (_) {
+        /* keep last preview */
+    } finally {
+        if (seq === vtAlignPreviewSeq) preview.classList.remove('vt-preview-loading');
+    }
+}
+
+function vtApplyAlignEditorSlidersToCurrent() {
+    const f = vtFrames[vtAlignEditorIdx];
+    if (!f) return;
+    const scale = parseFloat(document.getElementById('vt-align-scale')?.value || '1');
+    const offsetX = parseInt(document.getElementById('vt-align-offset-x')?.value || '0', 10);
+    const offsetY = parseInt(document.getElementById('vt-align-offset-y')?.value || '0', 10);
+    vtAlignAdjustments[f.filename] = { scale_mul: scale, offset_x: offsetX, offset_y: offsetY };
+    document.getElementById('vt-align-scale-val').textContent = scale.toFixed(2);
+    document.getElementById('vt-align-offset-x-val').textContent = String(offsetX);
+    document.getElementById('vt-align-offset-y-val').textContent = String(offsetY);
+    vtScheduleAlignPreview();
+}
+
+function vtRenderAlignEditor() {
+    const f = vtFrames[vtAlignEditorIdx];
+    if (!f) return;
+    const preview = document.getElementById('vt-align-preview');
+    const ghost = document.getElementById('vt-align-ghost');
+    const label = document.getElementById('vt-align-frame-label');
+    if (label) label.textContent = `${vtAlignEditorIdx + 1} / ${vtFrames.length} · ${f.filename}`;
+
+    const adj = vtAlignAdjustments[f.filename] || { scale_mul: 1, offset_x: 0, offset_y: 0 };
+    document.getElementById('vt-align-scale').value = adj.scale_mul;
+    document.getElementById('vt-align-offset-x').value = adj.offset_x;
+    document.getElementById('vt-align-offset-y').value = adj.offset_y;
+    document.getElementById('vt-align-scale-val').textContent = Number(adj.scale_mul).toFixed(2);
+    document.getElementById('vt-align-offset-x-val').textContent = String(adj.offset_x);
+    document.getElementById('vt-align-offset-y-val').textContent = String(adj.offset_y);
+
+    vtScheduleAlignPreview();
+
+    const showGhost = document.getElementById('vt-align-onion')?.checked;
+    if (ghost) {
+        if (showGhost && vtAlignEditorIdx > 0) {
+            const prev = vtFrames[vtAlignEditorIdx - 1];
+            ghost.src = vtFrameUrl(prev.path, false);
+            ghost.style.display = 'block';
+        } else {
+            ghost.style.display = 'none';
+        }
+    }
+}
+
+function vtAlignEditorPrev() {
+    if (vtAlignEditorIdx > 0) {
+        vtApplyAlignEditorSlidersToCurrent();
+        vtAlignEditorIdx -= 1;
+        vtRenderAlignEditor();
+    }
+}
+
+function vtAlignEditorNext() {
+    if (vtAlignEditorIdx < vtFrames.length - 1) {
+        vtApplyAlignEditorSlidersToCurrent();
+        vtAlignEditorIdx += 1;
+        vtRenderAlignEditor();
+    }
+}
+
+function vtAlignEditorCopyRef() {
+    vtApplyAlignEditorSlidersToCurrent();
+    const ref = vtAlignAdjustments[vtFrames[vtAlignEditorIdx].filename];
+    vtFrames.forEach((f) => {
+        vtAlignAdjustments[f.filename] = { ...ref };
+    });
+    showGitResult('已复制', 'success', '当前帧参数已应用到全部');
+}
+
+function vtAlignEditorStopPlay() {
+    if (vtAlignPlayTimer) {
+        clearInterval(vtAlignPlayTimer);
+        vtAlignPlayTimer = null;
+    }
+    const btn = document.getElementById('vt-align-play-btn');
+    if (btn) btn.textContent = '▶ 预览动画';
+}
+
+function vtAlignEditorTogglePlay() {
+    if (vtAlignPlayTimer) {
+        vtAlignEditorStopPlay();
+        return;
+    }
+    const btn = document.getElementById('vt-align-play-btn');
+    if (btn) btn.textContent = '⏸ 停止预览';
+    vtAlignPlayTimer = setInterval(() => {
+        if (vtAlignEditorIdx >= vtFrames.length - 1) vtAlignEditorIdx = 0;
+        else vtAlignEditorIdx += 1;
+        vtRenderAlignEditor();
+    }, 300);
+}
+
+async function vtAlignEditorSave() {
+    if (!vtCurrentVideoId || !vtLastBatchId) return;
+    vtApplyAlignEditorSlidersToCurrent();
+    try {
+        const resp = await fetch(`/api/video/${vtCurrentVideoId}/align-adjust`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                batch_id: vtLastBatchId,
+                adjustments: vtAlignAdjustments,
+            }),
+        });
+        const data = await resp.json();
+        if (!data.success) throw new Error(data.error || '保存失败');
+        showGitResult('✅ 已保存', 'success', `更新 ${data.updated} 帧`);
+        vtCloseAlignEditor();
+        await vtRefreshFrames();
+    } catch (err) {
+        showGitResult('❌ 保存失败', 'error', err.message);
     }
 }
 
@@ -382,6 +771,23 @@ function vtFrameUrl(relPath, thumb, download) {
     if (download) q.push('download=1');
     const qs = q.length ? `?${q.join('&')}` : '';
     return `/api/video/frame/${relPath.split('/').map(encodeURIComponent).join('/')}${qs}`;
+}
+
+function vtPreviewFrame(frame) {
+    if (!frame) return;
+    if (typeof currentPreviewPath !== 'undefined') currentPreviewPath = frame.path;
+    const modal = document.getElementById('image-modal');
+    if (!modal) return;
+    document.getElementById('modal-image').src = vtFrameUrl(frame.path, false);
+    document.getElementById('modal-title').textContent = frame.filename || '截帧预览';
+    document.getElementById('modal-path').textContent = frame.path || '';
+    document.getElementById('modal-size').textContent = frame.size ? formatSize(frame.size) : '';
+    const dl = document.getElementById('modal-download');
+    if (dl) {
+        dl.href = vtFrameUrl(frame.path, false, true);
+        dl.download = frame.filename || 'frame.png';
+    }
+    modal.classList.add('active');
 }
 
 function vtRenderFrameGrid() {
@@ -397,14 +803,14 @@ function vtRenderFrameGrid() {
     }
 
     grid.innerHTML = vtFrames.map((f, idx) => `
-        <label class="vt-frame-card ${vtSelectedPaths.has(f.path) ? 'selected' : ''}" data-idx="${idx}">
-            <input type="checkbox" ${vtSelectedPaths.has(f.path) ? 'checked' : ''} />
-            <img src="${vtFrameUrl(f.path, true)}" alt="" loading="lazy" />
+        <div class="vt-frame-card ${vtSelectedPaths.has(f.path) ? 'selected' : ''}" data-idx="${idx}">
+            <input type="checkbox" class="vt-frame-cb" ${vtSelectedPaths.has(f.path) ? 'checked' : ''} title="选择" />
+            <img src="${vtFrameUrl(f.path, true)}" alt="" loading="lazy" title="点击查看大图" />
             <div class="vt-frame-label">${vtEsc(f.filename)}</div>
             <div class="vt-frame-ts">${f.timestamp_ms != null ? vtFormatMs(f.timestamp_ms) : ''}</div>
             <button type="button" class="vt-frame-del" title="删除此帧">✕</button>
             <button type="button" class="vt-frame-dl" title="下载此帧">⬇</button>
-        </label>
+        </div>
     `).join('');
 
     grid.querySelectorAll('.vt-frame-card').forEach((card) => {
@@ -421,6 +827,10 @@ function vtRenderFrameGrid() {
             e.preventDefault();
             e.stopPropagation();
             vtDeleteOne(f.path);
+        });
+        card.addEventListener('click', (e) => {
+            if (e.target.closest('input[type="checkbox"], button')) return;
+            vtPreviewFrame(f);
         });
     });
 
@@ -453,6 +863,7 @@ function vtUpdateFrameActions() {
         delBtn.disabled = n === 0;
         delBtn.textContent = n <= 1 ? '删除' : `删除 (${n})`;
     }
+    vtUpdatePostProcessActions();
 }
 
 function vtDownloadOne(path, filename) {

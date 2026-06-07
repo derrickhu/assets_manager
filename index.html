@@ -172,6 +172,9 @@
             <div id="vt-ffmpeg-banner" class="vt-banner" style="display:none;">
                 ffmpeg 未就绪。若已安装请在本机执行 <code>cd asset_manager && ./service.sh install</code> 重启服务后硬刷新页面。
             </div>
+            <div id="vt-rembg-banner" class="vt-banner" style="display:none;">
+                rembg 未就绪。请执行 <code>pip3 install rembg onnxruntime</code> 后重启服务。
+            </div>
 
             <div class="vt-top-row">
                 <div class="vt-panel">
@@ -246,7 +249,7 @@
                 <div class="vt-panel">
                     <h3>说明</h3>
                     <p style="font-size:13px;color:var(--text-secondary);line-height:1.7;">
-                        常用流程：选视频 → 上方「快捷全片截帧」设间隔一键生成 → 下方结果区挑选下载或删除。左侧「截帧设置」支持单帧、自定义区间等高级模式。
+                        常用流程：选视频 → 快捷全片截帧 → 后处理抠图 → 自动对齐 → 下方结果下载。跳跃/浮空帧可用对齐编辑器微调 offset。
                     </p>
                 </div>
             </div>
@@ -284,9 +287,56 @@
                 </div>
             </div>
 
+            <div class="vt-panel vt-post-process" id="vt-post-process">
+                <h3>后处理流水线</h3>
+                <p class="vt-post-desc">截帧完成后：先抠图去背景，再统一脚底基线与人物身高。跳跃/浮空帧可打开对齐编辑器微调。</p>
+                <div class="vt-post-steps">
+                    <div class="vt-post-step">
+                        <div class="vt-post-step-head">Step 1 · 抠图</div>
+                        <div class="vt-post-step-body">
+                            <label for="vt-matte-model">模型</label>
+                            <select id="vt-matte-model">
+                                <option value="birefnet-general">birefnet-general（默认）</option>
+                                <option value="birefnet-general-lite">birefnet-general-lite（较快）</option>
+                                <option value="isnet-anime">isnet-anime（动漫）</option>
+                                <option value="u2net">u2net（最快）</option>
+                            </select>
+                            <button class="btn btn-primary btn-sm" id="vt-matte-btn" disabled onclick="vtMatteSelected()">批量抠图选中</button>
+                            <div class="vt-job-progress" id="vt-matte-progress" style="display:none">
+                                <div class="vt-job-bar"><div class="vt-job-fill" id="vt-matte-fill"></div></div>
+                                <span id="vt-matte-progress-text">0 / 0</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="vt-post-step">
+                        <div class="vt-post-step-head">Step 2 · 对齐</div>
+                        <div class="vt-post-step-body">
+                            <label>画布</label>
+                            <input type="number" id="vt-align-canvas-w" value="512" min="64" max="2048" step="1" />
+                            <span>×</span>
+                            <input type="number" id="vt-align-canvas-h" value="512" min="64" max="2048" step="1" />
+                            <label for="vt-align-bottom-pad">底边距</label>
+                            <input type="number" id="vt-align-bottom-pad" value="8" min="0" max="200" />
+                            <span>px</span>
+                            <button class="btn btn-primary btn-sm" id="vt-align-btn" disabled onclick="vtAlignSelected()">自动对齐选中</button>
+                            <button class="btn btn-secondary btn-sm" id="vt-align-editor-btn" disabled onclick="vtOpenAlignEditor()">打开对齐编辑器</button>
+                            <div class="vt-job-progress" id="vt-align-progress" style="display:none">
+                                <div class="vt-job-bar"><div class="vt-job-fill" id="vt-align-fill"></div></div>
+                                <span id="vt-align-progress-text">0 / 0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="vt-panel vt-frames-section">
                 <h3>截帧结果 (<span id="vt-frame-count">0</span>)</h3>
                 <div class="vt-frames-toolbar">
+                    <div class="vt-stage-tabs">
+                        <button type="button" class="vt-stage-tab active" data-stage="raw" onclick="vtSwitchStage('raw')">原始</button>
+                        <button type="button" class="vt-stage-tab" data-stage="matte" onclick="vtSwitchStage('matte')">抠图</button>
+                        <button type="button" class="vt-stage-tab" data-stage="align" onclick="vtSwitchStage('align')">对齐</button>
+                    </div>
                     <label><input type="checkbox" onchange="vtSelectAllFrames(this.checked)" /> 全选</label>
                     <span style="font-size:12px;color:var(--text-muted);">已选 <span id="vt-selected-count">0</span></span>
                     <button class="btn btn-primary btn-sm" id="vt-download-btn" disabled onclick="vtDownloadToLocal()">下载到本地</button>
@@ -298,6 +348,41 @@
                 </div>
             </div>
         </main>
+    </div>
+
+    <!-- 对齐编辑器 -->
+    <div class="modal" id="vt-align-editor">
+        <div class="modal-overlay" onclick="vtCloseAlignEditor()"></div>
+        <div class="modal-content vt-align-editor-content">
+            <button class="modal-close" onclick="vtCloseAlignEditor()">✕</button>
+            <h3>对齐编辑器</h3>
+            <p class="vt-align-editor-hint">调整单帧 scale / 偏移；洋葱皮叠上一帧便于对比位移。保存后写回当前对齐 batch。</p>
+            <div class="vt-align-editor-main">
+                <div class="vt-align-preview-wrap">
+                    <img id="vt-align-ghost" class="vt-align-ghost" alt="" />
+                    <img id="vt-align-preview" alt="" />
+                </div>
+                <div class="vt-align-controls">
+                    <div class="vt-align-nav">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="vtAlignEditorPrev()">上一帧</button>
+                        <span id="vt-align-frame-label">1 / 1</span>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="vtAlignEditorNext()">下一帧</button>
+                    </div>
+                    <label>缩放 <span id="vt-align-scale-val">1.00</span></label>
+                    <input type="range" id="vt-align-scale" min="0.5" max="1.5" step="0.01" value="1" />
+                    <label>水平偏移 <span id="vt-align-offset-x-val">0</span>px</label>
+                    <input type="range" id="vt-align-offset-x" min="-120" max="120" step="1" value="0" />
+                    <label>垂直偏移 <span id="vt-align-offset-y-val">0</span>px</label>
+                    <input type="range" id="vt-align-offset-y" min="-120" max="120" step="1" value="0" />
+                    <label><input type="checkbox" id="vt-align-onion" checked /> 洋葱皮（上一帧）</label>
+                    <div class="vt-align-editor-actions">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="vtAlignEditorCopyRef()">复制当前到全部</button>
+                        <button type="button" class="btn btn-secondary btn-sm" id="vt-align-play-btn" onclick="vtAlignEditorTogglePlay()">▶ 预览动画</button>
+                        <button type="button" class="btn btn-primary btn-sm" onclick="vtAlignEditorSave()">保存</button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- 图片预览模态框 -->

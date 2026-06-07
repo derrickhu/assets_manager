@@ -111,14 +111,31 @@ async function loadAssets() {
     }
 }
 
+function isLoopbackUrl(url) {
+    try {
+        const host = new URL(url).hostname;
+        return host === 'localhost' || host === '127.0.0.1';
+    } catch {
+        return true;
+    }
+}
+
 async function loadServerInfo() {
     const link = document.getElementById('server-info');
     const label = document.getElementById('server-url');
     try {
         const resp = await fetch('/api/info');
         const info = await resp.json();
-        const localUrl = info.url || `http://localhost:${info.port || 5050}`;
-        const lanUrl = info.lan_url || localUrl;
+        const port = info.port || 5050;
+        const localUrl = info.url || `http://localhost:${port}`;
+        let lanUrl = info.lan_url || localUrl;
+        // 服务端 IP 探测失败时，若用户通过局域网 IP 打开页面则沿用当前 host
+        if (isLoopbackUrl(lanUrl)) {
+            const pageHost = window.location.hostname;
+            if (pageHost && !isLoopbackUrl(`${window.location.protocol}//${pageHost}`)) {
+                lanUrl = `${window.location.protocol}//${pageHost}:${port}`;
+            }
+        }
         currentServerUrl = localUrl;
         currentServerLanUrl = lanUrl;
         if (label) {
@@ -126,7 +143,7 @@ async function loadServerInfo() {
                 `<span class="server-lan-line">${esc(lanUrl)}</span>` +
                 `<span class="server-local-line">本机 ${esc(localUrl.replace(/^https?:\/\//, ''))}</span>`;
         }
-        if (link) link.href = localUrl;
+        if (link) link.href = lanUrl;
     } catch (e) {
         const url = window.location.origin;
         currentServerUrl = url;
@@ -554,7 +571,12 @@ function closeModal() {
 }
 
 function copyLink() {
-    const url = `${window.location.origin}/api/file/${encPath(currentPreviewPath)}`;
+    let url;
+    if (currentPreviewPath && currentPreviewPath.startsWith('frames/')) {
+        url = `${window.location.origin}/api/video/frame/${currentPreviewPath.split('/').map(encodeURIComponent).join('/')}`;
+    } else {
+        url = `${window.location.origin}/api/file/${encPath(currentPreviewPath)}`;
+    }
     navigator.clipboard.writeText(url).then(() => {
         alert('链接已复制！可以在局域网内其他设备打开');
     });

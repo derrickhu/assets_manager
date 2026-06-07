@@ -32,6 +32,7 @@ FRAME_THUMBS_DIR = WORKSPACE_ROOT / '.thumbs'
 
 VIDEO_EXTS = {'.mp4', '.mov', '.webm', '.mkv'}
 FRAME_EXTS = {'.png', '.jpg', '.jpeg'}
+BATCH_META_FILE = '_batch_meta.json'
 VIDEO_MAX_MB = int(os.environ.get('VIDEO_MAX_MB', '500'))
 MAX_EXTRACT_FRAMES = int(os.environ.get('VIDEO_MAX_FRAMES', '500'))
 WORKSPACE_TTL_DAYS = int(os.environ.get('VIDEO_WORKSPACE_TTL_DAYS', '7'))
@@ -191,6 +192,85 @@ def resolve_workspace_path(rel_path: str) -> Path:
     except ValueError as exc:
         raise ValueError('Invalid workspace path') from exc
     return target
+
+
+def resolve_frame_paths(video_id: str, frame_paths: list[str]) -> list[Path]:
+    prefix = f'frames/{video_id}/'
+    resolved: list[Path] = []
+    for rel in frame_paths:
+        rel_norm = rel.replace('\\', '/').lstrip('/')
+        if not rel_norm.startswith(prefix):
+            raise ValueError(f'Invalid frame path: {rel}')
+        src = resolve_workspace_path(rel_norm)
+        if not src.exists() or not src.is_file():
+            raise FileNotFoundError(f'Frame not found: {rel}')
+        if src.suffix.lower() not in FRAME_EXTS:
+            raise ValueError(f'Unsupported frame type: {rel}')
+        resolved.append(src)
+    return resolved
+
+
+def batch_stage_from_id(batch_id: str) -> str:
+    if batch_id.startswith('matte_'):
+        return 'matte'
+    if batch_id.startswith('align_'):
+        return 'align'
+    return 'raw'
+
+
+def latest_batch_id(video_id: str, stage: str | None = None) -> str | None:
+    base = FRAMES_DIR / video_id
+    if not base.exists():
+        return None
+    prefix_map = {'raw': 'batch_', 'matte': 'matte_', 'align': 'align_'}
+    if stage and stage in prefix_map:
+        prefix = prefix_map[stage]
+        batches = sorted(
+            [p.name for p in base.iterdir() if p.is_dir() and p.name.startswith(prefix)],
+            reverse=True,
+        )
+        return batches[0] if batches else None
+    batches = sorted([p.name for p in base.iterdir() if p.is_dir()], reverse=True)
+    return batches[0] if batches else None
+
+
+def write_batch_meta(batch_dir: Path, meta: dict[str, Any]) -> None:
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    with (batch_dir / BATCH_META_FILE).open('w', encoding='utf-8') as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def read_batch_meta(batch_dir: Path) -> dict[str, Any] | None:
+    path = batch_dir / BATCH_META_FILE
+    if not path.exists():
+        return None
+    with path.open('r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def alpha_bbox(im: 'Image.Image', alpha_th: int = 16) -> tuple[int, int, int, int] | None:
+    if not HAS_PIL:
+        return None
+    if im.mode != 'RGBA':
+        im = im.convert('RGBA')
+    alpha = im.split()[3].point(lambda p: 255 if p > alpha_th else 0)
+    return alpha.getbbox()
+
+
+def alpha_trim(im: 'Image.Image', padding: int = 4, alpha_th: int = 16) -> 'Image.Image':
+    if not HAS_PIL:
+        return im
+    if im.mode != 'RGBA':
+        im = im.convert('RGBA')
+    bbox = alpha_bbox(im, alpha_th)
+    if not bbox:
+        return im
+    x0, y0, x1, y1 = bbox
+    x0 = max(0, x0 - padding)
+    y0 = max(0, y0 - padding)
+    x1 = min(im.width, x1 + padding)
+    y1 = min(im.height, y1 + padding)
+    return im.crop((x0, y0, x1, y1))
 
 
 def list_videos(limit: int = 50) -> list[dict[str, Any]]:
@@ -404,32 +484,58 @@ def extract_frames(
     }
 
 
-def list_frames(video_id: str, batch_id: str | None = None) -> list[dict[str, Any]]:
+def list_frames(
+    video_id: str,
+    batch_id: str | None = None,
+    stage: str | None = None,
+) -> list[dict[str, Any]]:
     base = FRAMES_DIR / video_id
     if not base.exists():
         return []
 
-    batches = [batch_id] if batch_id else sorted(
-        [p.name for p in base.iterdir() if p.is_dir()],
-        reverse=True,
-    )
+    if batch_id:
+        batches = [batch_id]
+    elif stage in ('raw', 'matte', 'align'):
+        latest = latest_batch_id(video_id, stage)
+        batches = [latest] if latest else []
+    else:
+        latest = latest_batch_id(video_id)
+        batches = [latest] if latest else []
+
     frames: list[dict[str, Any]] = []
     for bid in batches:
         batch_path = base / bid
         if not batch_path.is_dir():
             continue
+        batch_meta = read_batch_meta(batch_path) or {}
+        frame_meta_map = batch_meta.get('frames') or {}
+        st = batch_meta.get('stage') or batch_stage_from_id(bid)
         for fpath in sorted(batch_path.iterdir()):
             if not fpath.is_file() or fpath.suffix.lower() not in FRAME_EXTS:
                 continue
+            if fpath.name == BATCH_META_FILE:
+                continue
             rel = str(fpath.relative_to(WORKSPACE_ROOT)).replace('\\', '/')
             ts_match = re.search(r'_frame_(\d+)\.', fpath.name)
-            frames.append({
+            fm = frame_meta_map.get(fpath.name) or {}
+            item: dict[str, Any] = {
                 'path': rel,
                 'filename': fpath.name,
                 'batch_id': bid,
-                'timestamp_ms': int(ts_match.group(1)) if ts_match else None,
+                'stage': st,
+                'timestamp_ms': fm.get('timestamp_ms') or (int(ts_match.group(1)) if ts_match else None),
                 'size': fpath.stat().st_size,
-            })
+            }
+            if fm.get('source_path'):
+                item['source_path'] = fm['source_path']
+            if st == 'align' and fm:
+                item['align_meta'] = {
+                    k: fm[k] for k in (
+                        'scale', 'scale_mul', 'paste_x', 'paste_y',
+                        'offset_x', 'offset_y', 'canvas_w', 'canvas_h', 'bottom_pad',
+                    ) if k in fm
+                }
+            frames.append(item)
     return frames
 
 
