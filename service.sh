@@ -122,13 +122,14 @@ do_start() {
         sleep 1
     fi
 
-    # 后台启动（nohup），日志输出到文件；关闭 debug/reloader 避免双进程与 PID 漂移
+    # 后台启动（nohup + disown），关闭终端不会退出；日志输出到文件
     cd "$APP_DIR"
     export HOST=0.0.0.0
     export PORT=$PORT
     export ASSET_DEBUG=0
     nohup python3 "$SERVER_SCRIPT" >> "$LOG_FILE" 2>&1 &
     local new_pid=$!
+    disown "$new_pid" 2>/dev/null || true
     echo "$new_pid" > "$PID_FILE"
 
     # 等待启动确认（Flask 绑定 0.0.0.0 需要稍等）
