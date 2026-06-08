@@ -41,6 +41,7 @@ Thumbs.db
 .server.log
 *.log
 .video_workspace/
+.thumbs/
 
 # 不要提交游戏资产（资产在另一个目录）
 # game_assets/  # 这个在另一个目录，不需要在这里ignore
